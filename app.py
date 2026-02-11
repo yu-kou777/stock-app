@@ -1,6 +1,7 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
+import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 
 # ==========================================
@@ -23,125 +24,127 @@ TICKERS = [
 ]
 
 # ==========================================
-# 🧠 分析ロジック
+# 🧠 テクニカル分析ロジック
 # ==========================================
 
-def get_stock_data(ticker):
-    """株価データを取得して指標を計算する"""
+def get_stock_analysis(ticker):
     try:
         stock = yf.Ticker(ticker)
-        # 過去半年分のデータを取得
-        hist = stock.history(period="6mo")
-        
-        if len(hist) < 30: return None
+        # 日足データを取得（MACD計算のため期間を長めに設定）
+        df = stock.history(period="1y")
+        if len(df) < 50: return None
 
-        # テクニカル指標の計算
-        close = hist['Close']
+        close = df['Close']
         
-        # 移動平均線 (SMA)
-        sma5 = close.rolling(5).mean()
-        sma25 = close.rolling(25).mean()
-        
-        # RSI (14日)
+        # --- RSI (14日) ---
         delta = close.diff()
         gain = (delta.where(delta > 0, 0)).rolling(14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
         rsi = 100 - (100 / (1 + gain/loss))
+
+        # --- MACD (12, 26, 9) ---
+        ema12 = close.ewm(span=12, adjust=False).mean()
+        ema26 = close.ewm(span=26, adjust=False).mean()
+        macd_line = ema12 - ema26
+        signal_line = macd_line.ewm(span=9, adjust=False).mean()
         
-        # 直近データ
+        # 直近の指標
         curr_price = close.iloc[-1]
         curr_rsi = rsi.iloc[-1]
-        
-        # トレンド判定 (25日線の傾き)
-        slope_25 = (sma25.iloc[-1] - sma25.iloc[-5]) / 5
-        
+        curr_macd = macd_line.iloc[-1]
+        curr_signal = signal_line.iloc[-1]
+        prev_macd = macd_line.iloc[-2]
+        prev_signal = signal_line.iloc[-2]
+
+        # 判定用フラグ
+        is_golden_cross = (prev_macd < prev_signal) and (curr_macd > curr_signal)
+        is_dead_cross = (prev_macd > prev_signal) and (curr_macd < curr_signal)
+
         return {
             "code": ticker,
             "price": curr_price,
             "rsi": curr_rsi,
-            "sma5": sma5.iloc[-1],
-            "sma25": sma25.iloc[-1],
-            "slope_25": slope_25,
-            # 出来高急増度（直近 / 5日平均）
-            "volume_ratio": hist['Volume'].iloc[-1] / (hist['Volume'].rolling(5).mean().iloc[-1] + 1)
+            "macd_gc": is_golden_cross,
+            "macd_dc": is_dead_cross,
+            "trend": "up" if curr_macd > curr_signal else "down"
         }
     except:
         return None
 
-def analyze_market(min_price, max_price):
-    """市場全体をスキャンしてスコアリングする"""
+def run_screening(min_p, max_p):
     results_buy = []
     results_sell = []
     
-    # 並列処理で高速化
     with ThreadPoolExecutor(max_workers=10) as executor:
-        data_list = list(executor.map(get_stock_data, TICKERS))
+        data_list = list(executor.map(get_stock_analysis, TICKERS))
     
     for data in data_list:
         if data is None: continue
+        if not (min_p <= data["price"] <= max_p): continue
         
-        price = data["price"]
-        
-        # 1. 価格帯フィルター
-        if not (min_price <= price <= max_price): continue
-        
-        # --- 買いスコア (Swing Long) ---
-        buy_score = 0
-        if data["slope_25"] > 0: buy_score += 30 # 上昇トレンド
-        if 30 <= data["rsi"] <= 50: buy_score += 40 # 押し目買いゾーン
-        if data["price"] > data["sma25"]: buy_score += 20 # 25日線より上
-        if data["volume_ratio"] > 1.5: buy_score += 10 # 出来高増加
-        
-        if buy_score >= 60:
-            results_buy.append({**data, "score": buy_score})
+        # --- 買い時推奨 (Buy Signal) ---
+        # 条件: RSIが40以下（売られすぎ）または MACDがゴールデンクロス
+        if (data["rsi"] < 45 and data["trend"] == "up") or data["macd_gc"]:
+            results_buy.append(data)
 
-        # --- 売りスコア (Swing Short / 信用売り) ---
-        sell_score = 0
-        if data["slope_25"] < 0: sell_score += 30 # 下落トレンド
-        if 60 <= data["rsi"] <= 80: sell_score += 40 # 戻り売りゾーン
-        if data["price"] < data["sma25"]: sell_score += 20 # 25日線より下
-        
-        if sell_score >= 60:
-            results_sell.append({**data, "score": sell_score})
+        # --- 売り時推奨 (Sell Signal / 空売り) ---
+        # 条件: RSIが65以上（買われすぎ）または MACDがデッドクロス
+        if (data["rsi"] > 60 and data["trend"] == "down") or data["macd_dc"]:
+            results_sell.append(data)
 
-    # ランキング作成 (スコア順)
-    results_buy = sorted(results_buy, key=lambda x: x["score"], reverse=True)[:10]
-    results_sell = sorted(results_sell, key=lambda x: x["score"], reverse=True)[:10]
-    
-    return results_buy, results_sell
+    return sorted(results_buy, key=lambda x: x["rsi"])[:10], \
+           sorted(results_sell, key=lambda x: x["rsi"], reverse=True)[:10]
 
 # ==========================================
-# 📱 アプリ画面 (Streamlit)
+# 📱 アプリ画面設計 (UI)
 # ==========================================
 
-st.title("📈 翌日狙い目スキャナー")
-st.write("日足チャートから、10日以内に利益が出そうな銘柄をAIが選定します。")
+st.set_page_config(page_title="AI株スキャナー Pro", layout="centered")
+st.title("🎯 AI株スキャナー Pro")
+st.caption("RSI ＋ MACD 指標による大引け分析")
 
-# サイドバー設定
-st.sidebar.header("検索条件")
-price_range = st.sidebar.slider("株価の範囲 (円)", 100, 20000, (1000, 5000))
+# --- 価格設定（手入力とバーの連動） ---
+st.write("### 💰 検索価格帯を指定")
 
-# 分析ボタン
-if st.button("🔍 市場をスキャンして分析開始"):
-    st.info("データ取得中... (約10〜30秒かかります)")
-    buy_list, sell_list = analyze_market(price_range[0], price_range[1])
+# 手入力用
+c1, c2 = st.columns(2)
+with c1:
+    input_min = st.number_input("最低価格 (円)", value=1000, step=100)
+with c2:
+    input_max = st.number_input("最高価格 (円)", value=10000, step=100)
+
+# バー（スライダー）用。手入力の値と初期値を連動。
+slider_range = st.slider("スライダーで微調整", 100, 50000, (int(input_min), int(input_max)))
+
+# --- 分析実行 ---
+if st.button("🚀 最新の状況をスキャン", use_container_width=True):
+    # スライダーの値を優先して採用
+    p_min, p_max = slider_range
     
-    # --- 買い候補の表示 ---
-    st.header(f"🚀 買い (Long) 推奨 TOP{len(buy_list)}")
-    st.success("上昇トレンド中の押し目、または反発狙いの銘柄です。")
+    with st.spinner('大引け状況を確認中...'):
+        buy_list, sell_list = run_screening(p_min, p_max)
+    
+    st.success(f"スキャン完了！ (価格帯: {p_min:,}円 〜 {p_max:,}円)")
+
+    # --- 結果表示: 買い推奨 ---
+    st.subheader("🚀 買い時推奨 (Long)")
+    st.info("RSI低位からの反発、またはMACDゴールデンクロスの銘柄です。")
     if buy_list:
-        df_buy = pd.DataFrame(buy_list)[["code", "price", "rsi", "score"]]
-        df_buy.columns = ["コード", "現在値", "RSI", "スコア"]
-        st.table(df_buy)
+        df_b = pd.DataFrame(buy_list)[["code", "price", "rsi"]]
+        df_b.columns = ["コード", "終値", "RSI"]
+        st.table(df_b)
     else:
-        st.write("条件に合う買い銘柄が見つかりませんでした。")
+        st.write("現在、推奨銘柄はありません。")
 
-    # --- 売り候補の表示 ---
-    st.header(f"📉 空売り (Short) 推奨 TOP{len(sell_list)}")
-    st.error("下落トレンド中の戻り、または加熱感のある銘柄です（信用取引）。")
+    # --- 結果表示: 売り推奨 ---
+    st.subheader("📉 売り時推奨 (Short)")
+    st.error("RSI高位からの反落、またはMACDデッドクロスの銘柄です。")
     if sell_list:
-        df_sell = pd.DataFrame(sell_list)[["code", "price", "rsi", "score"]]
-        df_sell.columns = ["コード", "現在値", "RSI", "スコア"]
-        st.table(df_sell)
+        df_s = pd.DataFrame(sell_list)[["code", "price", "rsi"]]
+        df_s.columns = ["コード", "終値", "RSI"]
+        st.table(df_s)
     else:
-        st.write("条件に合う売り銘柄が見つかりませんでした。")
+        st.write("現在、推奨銘柄はありません。")
+
+st.divider()
+st.caption("※15:00以降に実行すると、その日の大引け確定値で計算されます。")
