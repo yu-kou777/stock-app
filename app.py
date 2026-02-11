@@ -4,53 +4,68 @@ import pandas as pd
 from concurrent.futures import ThreadPoolExecutor
 
 # ==========================================
-# ⚙️ バリュー株（低PBR・高配当）厳選リスト
+# ⚙️ ユーザー設定エリア
 # ==========================================
-SECTOR_TICKERS = {
-    "銀行・金融 (低PBRの宝庫)": {
-        "8306.T": "三菱UFJ", "8316.T": "三井住友", "8411.T": "みずほ", "8591.T": "オリックス",
-        "8604.T": "野村HD", "8766.T": "東京海上", "8725.T": "MS&AD", "8750.T": "第一生命",
-        "7182.T": "ゆうちょ", "8308.T": "りそな", "8309.T": "三井住友トラ"
-    },
-    "商社・卸売 (割安・高配当)": {
-        "8001.T": "伊藤忠", "8002.T": "丸紅", "8031.T": "三井物産", "8053.T": "住友商事",
-        "8058.T": "三菱商事", "2768.T": "双日", "8015.T": "豊田通商", "8020.T": "兼松"
-    },
-    "鉄鋼・非鉄・素材 (景気敏感)": {
-        "5401.T": "日本製鉄", "5411.T": "JFE", "5406.T": "神戸製鋼", "5713.T": "住友鉱山",
-        "5714.T": "DOWA", "5706.T": "三井金", "3407.T": "旭化成", "4005.T": "住友化学",
-        "4183.T": "三井化学", "4208.T": "UBE", "5020.T": "ENEOS", "1605.T": "INPEX"
-    },
-    "建設・不動産 (内需バリュー)": {
-        "1801.T": "大成建設", "1802.T": "大林組", "1803.T": "清水建設", "1812.T": "鹿島",
-        "1925.T": "大和ハウス", "1928.T": "積水ハウス", "8801.T": "三井不動産",
-        "8802.T": "三菱地所", "8830.T": "住友不動産", "3289.T": "東急不HD"
-    },
-    "自動車・輸送機 (円安恩恵)": {
-        "7203.T": "トヨタ", "7267.T": "ホンダ", "7201.T": "日産自", "7270.T": "SUBARU",
-        "7269.T": "スズキ", "7272.T": "ヤマハ発", "7011.T": "三菱重工", "7012.T": "川崎重工",
-        "7013.T": "IHI"
-    },
-    "通信・インフラ (安定収益)": {
-        "9432.T": "NTT", "9433.T": "KDDI", "9434.T": "ソフトバンク", "9501.T": "東電HD",
-        "9503.T": "関西電力", "9531.T": "東京ガス", "9532.T": "大阪ガス",
-        "9020.T": "JR東", "9021.T": "JR西", "9022.T": "JR東海", "9101.T": "日本郵船",
-        "9104.T": "商船三井", "9107.T": "川崎汽船"
-    }
+
+# 1. ここに「225以外で監視したい銘柄」を追加できます
+#    （例：スタンダード市場の株、REIT、優待株など）
+MY_FAVORITES = {
+    # "コード.T": "銘柄名",
+    "8591.T": "オリックス",
+    "9434.T": "ソフトバンク",
+    "3003.T": "ヒューリック",
+    "2702.T": "マクドナルド",
+    # 必要に応じて増やしてください
 }
 
-# 全銘柄リストの作成
-ALL_TICKERS = {}
-for sector, tickers in SECTOR_TICKERS.items():
-    ALL_TICKERS.update(tickers)
+# ==========================================
+# 🔄 銘柄リスト自動取得ロジック
+# ==========================================
+@st.cache_data(ttl=3600*12) # 半日キャッシュ
+def get_target_tickers():
+    # 1. 日経225を自動取得
+    auto_dict = {}
+    try:
+        url = "https://en.wikipedia.org/wiki/Nikkei_225"
+        tables = pd.read_html(url)
+        df = tables[0]
+        
+        # 銘柄コードの列を探す
+        code_col = None
+        for col in df.columns:
+            if df[col].astype(str).str.match(r'\d{4}').any():
+                code_col = col
+                break
+        
+        if code_col:
+            name_col = "Company" if "Company" in df.columns else df.columns[0]
+            for index, row in df.iterrows():
+                code = str(row[code_col]) + ".T"
+                name = str(row[name_col])
+                auto_dict[code] = name
+    except:
+        pass # 失敗しても手動リストだけで動かす
+
+    # 2. 手動リストと合体させる（重複は上書き）
+    auto_dict.update(MY_FAVORITES)
+    
+    return auto_dict
 
 # ==========================================
 # 🧠 テクニカル分析ロジック
 # ==========================================
-
-def get_analysis(ticker, name):
+def get_analysis(ticker, name, min_p, max_p):
     try:
         stock = yf.Ticker(ticker)
+        
+        # 現在値チェック（高速化）
+        hist_check = stock.history(period="1d")
+        if hist_check.empty: return None
+        curr_price = hist_check["Close"].iloc[-1]
+        
+        if not (min_p <= curr_price <= max_p): return None
+
+        # 詳細データ取得
         df = stock.history(period="6mo")
         if len(df) < 60: return None
 
@@ -58,129 +73,121 @@ def get_analysis(ticker, name):
         high = df['High']
         low = df['Low']
         
-        # --- 1. RSI (14日) ---
+        # RSI
         delta = close.diff()
         gain = (delta.where(delta > 0, 0)).rolling(14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
         rsi = 100 - (100 / (1 + gain/loss))
         curr_rsi = rsi.iloc[-1]
+        prev_rsi = rsi.iloc[-3]
         
-        # --- 2. MACD ヒストグラム ---
+        # MACD
         ema12 = close.ewm(span=12, adjust=False).mean()
         ema26 = close.ewm(span=26, adjust=False).mean()
         macd_line = ema12 - ema26
         signal_line = macd_line.ewm(span=9, adjust=False).mean()
+        
         hist_now = macd_line.iloc[-1] - signal_line.iloc[-1]
-        hist_change = hist_now - (macd_line.iloc[-2] - signal_line.iloc[-2])
+        hist_prev = macd_line.iloc[-2] - signal_line.iloc[-2]
 
-        # --- 3. 抵抗線・支持線 ---
-        resistance = high.rolling(50).max().iloc[-1] # バリュー株は動きが遅いので50日高値を意識
-        support = low.rolling(50).min().iloc[-1]
-        curr_price = close.iloc[-1]
+        # 抵抗線・支持線
+        resistance = high.rolling(25).max().iloc[-1]
+        support = low.rolling(25).min().iloc[-1]
 
-        # --- 4. スコアリング ---
-        score = 50
-        # バリュー株の「押し目買い」ロジック
-        if curr_rsi < 35: score += 20     # 売られすぎ
-        elif curr_rsi < 45: score += 10
+        # 判定スコア
+        buy_score = 0
+        sell_score = 0
         
-        if hist_now < 0 and hist_change > 0: score += 15 # 反発の兆し
-        
-        # バリュー株の「戻り売り」ロジック
-        if curr_rsi > 75: score -= 20
-        elif curr_rsi > 65: score -= 10
-        
+        # 買いロジック
+        if curr_rsi < 30: buy_score += 40
+        elif curr_rsi < 40: buy_score += 20
+        if hist_now > hist_prev: buy_score += 20 # MACD改善
+        if hist_now < 0 and hist_prev < 0: buy_score += 10
+        if curr_rsi > prev_rsi: buy_score += 10 
+
+        # 売りロジック
+        if curr_rsi > 70: sell_score += 40
+        elif curr_rsi > 60: sell_score += 20
+        if hist_now < hist_prev: sell_score += 20 # MACD悪化
+        if hist_now > 0 and hist_prev > 0: sell_score += 10
+        if curr_rsi < prev_rsi: sell_score += 10 
+
         return {
             "name": name,
             "code": ticker.replace(".T", ""),
             "price": curr_price,
             "rsi": curr_rsi,
-            "score": score,
+            "buy_score": buy_score,
+            "sell_score": sell_score,
             "resistance": resistance,
-            "support": support,
-            "signal": "買い" if score >= 70 else ("売り" if score <= 30 else "様子見")
+            "support": support
         }
     except:
         return None
 
-def run_scan(target_tickers, min_p, max_p):
+def run_scan(ticker_dict, min_p, max_p):
     results = []
+    target_tickers = list(ticker_dict.keys())
     
-    # 辞書からリストへ変換
-    scan_list = list(target_tickers.keys())
+    progress_text = "市場全体をスキャン中..."
+    my_bar = st.progress(0, text=progress_text)
     
     with ThreadPoolExecutor(max_workers=10) as executor:
-        futures = [executor.submit(get_analysis, t, target_tickers[t]) for t in scan_list]
-        for f in futures:
+        futures = [executor.submit(get_analysis, t, ticker_dict[t], min_p, max_p) for t in target_tickers]
+        total = len(futures)
+        for i, f in enumerate(futures):
             res = f.result()
-            if res and (min_p <= res["price"] <= max_p):
+            if res:
                 results.append(res)
-                
+            my_bar.progress((i + 1) / total, text=f"{progress_text} ({i+1}/{total})")
+            
+    my_bar.empty()
     return results
 
 # ==========================================
 # 📱 アプリ画面 UI
 # ==========================================
+st.set_page_config(page_title="最強株スキャナー", layout="wide")
+st.title("🦅 最強株スキャナー (ハイブリッド版)")
+st.caption("日経225自動取得 ＋ お気に入り銘柄を一括分析")
 
-st.set_page_config(page_title="バリュー株スカウター", layout="wide")
-st.title("💎 バリュー株スカウター (低PBR特化)")
-st.caption("東証プライム・スタンダードの「割安・高配当」銘柄からチャンスを探します")
+# リスト取得
+with st.spinner('監視リストを更新中...'):
+    TICKER_DICT = get_target_tickers()
 
-# --- サイドバーで業種選択 ---
-st.sidebar.header("📂 業種フィルター")
-selected_sectors = []
-for sector in SECTOR_TICKERS.keys():
-    if st.sidebar.checkbox(sector, value=True):
-        selected_sectors.append(sector)
+st.success(f"現在の監視対象: **{len(TICKER_DICT)}銘柄**")
 
-# 選択された業種の銘柄だけを抽出
-target_dict = {}
-for s in selected_sectors:
-    target_dict.update(SECTOR_TICKERS[s])
-
-# --- メイン画面設定 ---
+# 設定
 col1, col2 = st.columns([1, 2])
 with col1:
-    st.write("##### 💰 価格帯")
-    p_min = st.number_input("下限 (円)", value=100, step=100)
+    st.write("##### 💰 価格帯設定")
+    p_min = st.number_input("下限 (円)", value=1000, step=100)
     p_max = st.number_input("上限 (円)", value=10000, step=100)
-    
 with col2:
-    st.info(f"現在、**{len(target_dict)}銘柄** が監視対象です。\n左上の「＞」メニューから業種を絞り込めます。")
+    st.info("日経225（主要株）と、コード内で指定した「お気に入り株」をまとめて監視します。")
 
-if st.button("🚀 割安株をスキャン開始", use_container_width=True):
-    with st.spinner('バリュー株の状況を確認中...'):
-        data = run_scan(target_dict, p_min, p_max)
+# 実行
+if st.button("🚀 全銘柄スキャン開始", use_container_width=True):
+    data = run_scan(TICKER_DICT, p_min, p_max)
     
-    # --- 結果の整理 ---
-    df = pd.DataFrame(data)
-    
-    if not df.empty:
-        # 買い推奨（スコア高い順）
-        buys = df[df["score"] >= 65].sort_values("score", ascending=False)
-        # 売り推奨（スコア低い順）
-        sells = df[df["score"] <= 35].sort_values("score", ascending=True)
+    if data:
+        df = pd.DataFrame(data)
+        buys = df[df["buy_score"] >= 60].sort_values("buy_score", ascending=False).head(15)
+        sells = df[df["sell_score"] >= 60].sort_values("sell_score", ascending=False).head(15)
 
-        st.subheader("🔥 買いチャンス (押し目・反発狙い)")
-        if not buys.empty:
-            st.dataframe(
-                buys[["name", "code", "price", "rsi", "resistance", "support"]].rename(
-                    columns={"name":"銘柄", "code":"コード", "price":"現在値", "rsi":"RSI", "resistance":"上値目処", "support":"下値目処"}
-                ), 
-                use_container_width=True
-            )
-        else:
-            st.write("現在、明確な買いシグナルはありません。")
+        col_b, col_s = st.columns(2)
+        with col_b:
+            st.subheader("🔥 買い推奨")
+            if not buys.empty:
+                st.dataframe(buys[["name", "code", "price", "rsi", "support", "resistance"]], use_container_width=True)
+            else:
+                st.write("推奨なし")
 
-        st.subheader("🧊 売りチャンス (過熱感あり)")
-        if not sells.empty:
-            st.dataframe(
-                sells[["name", "code", "price", "rsi", "support", "resistance"]].rename(
-                    columns={"name":"銘柄", "code":"コード", "price":"現在値", "rsi":"RSI", "support":"下値目処", "resistance":"上値目処"}
-                ),
-                use_container_width=True
-            )
-        else:
-            st.write("現在、明確な売りシグナルはありません。")
+        with col_s:
+            st.subheader("📉 売り推奨")
+            if not sells.empty:
+                st.dataframe(sells[["name", "code", "price", "rsi", "resistance", "support"]], use_container_width=True)
+            else:
+                st.write("推奨なし")
     else:
-        st.warning("条件に合う銘柄が見つかりませんでした。価格帯などを変更してみてください。")
+        st.warning("条件に合う銘柄なし")
