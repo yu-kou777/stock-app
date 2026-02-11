@@ -38,50 +38,39 @@ BACKUP_225 = {
     "8601.T": "大和証券", "9107.T": "川崎汽船", "9531.T": "東京ガス", "9532.T": "大阪ガス"
 }
 
-# ユーザーのお気に入り (常に監視)
+# ユーザーのお気に入り
 MY_FAVORITES = {
     "8591.T": "オリックス", "3003.T": "ヒューリック", "2702.T": "マクドナルド"
 }
 
 # ==========================================
-# 🔄 銘柄リスト自動取得ロジック (修正版)
+# 🔄 銘柄リスト自動取得ロジック
 # ==========================================
 @st.cache_data(ttl=3600*12) 
 def get_tickers_safe():
     tickers_dict = {}
-    
-    # 1. Wikipediaから自動取得を試みる
     try:
         url = "https://en.wikipedia.org/wiki/Nikkei_225"
-        # html5libを使って丁寧に読み込む
         tables = pd.read_html(url, flavor='html5lib') 
         df = tables[0]
-        
-        # コード列を探す
         code_col = None
         for col in df.columns:
             if df[col].astype(str).str.match(r'\d{4}').any():
                 code_col = col
                 break
-        
         if code_col:
             name_col = "Company" if "Company" in df.columns else df.columns[0]
             for index, row in df.iterrows():
                 code = str(row[code_col]) + ".T"
                 name = str(row[name_col])
                 tickers_dict[code] = name
-            
     except Exception:
-        # エラー時は無視してバックアップへ（ここでの通知st.toastを削除しました）
         pass
     
-    # 2. 取得できたリストが空なら強制的にバックアップ
     if not tickers_dict:
         tickers_dict.update(BACKUP_225)
 
-    # 3. お気に入りを追加 (重複時はお気に入りの名前を優先)
     tickers_dict.update(MY_FAVORITES)
-    
     return tickers_dict
 
 # ==========================================
@@ -90,7 +79,6 @@ def get_tickers_safe():
 def get_analysis(ticker, name, min_p, max_p):
     try:
         stock = yf.Ticker(ticker)
-        
         hist_check = stock.history(period="1d")
         if hist_check.empty: return None
         curr_price = hist_check["Close"].iloc[-1]
@@ -152,7 +140,6 @@ def get_analysis(ticker, name, min_p, max_p):
 
 def run_scan(min_p, max_p):
     tickers_dict = get_tickers_safe()
-    
     results = []
     target_tickers = list(tickers_dict.keys())
     
@@ -175,9 +162,9 @@ def run_scan(min_p, max_p):
 # ==========================================
 # 📱 アプリ画面 UI
 # ==========================================
-st.set_page_config(page_title="最強株スキャナー (自動取得)", layout="wide")
+st.set_page_config(page_title="最強株スキャナー", layout="wide")
 st.title("🦅 最強株スキャナー")
-st.caption("日経225自動取得 ＋ 日本語バックアップ機能搭載")
+st.caption("日本語対応・安全版")
 
 col1, col2 = st.columns([1, 2])
 with col1:
@@ -200,14 +187,40 @@ if st.button("🚀 スキャン開始", use_container_width=True):
         with col_b:
             st.subheader("🔥 買い推奨")
             if not buys.empty:
-                st.dataframe(buys[["name", "code", "price", "rsi", "support", "resistance"]], use_container_width=True)
+                # ここでカラム名を日本語に変更して表示
+                st.dataframe(
+                    buys[["name", "code", "price", "rsi", "support", "resistance"]].rename(
+                        columns={
+                            "name": "銘柄名",
+                            "code": "コード",
+                            "price": "現在値",
+                            "rsi": "RSI",
+                            "support": "損切目安",
+                            "resistance": "利確目標"
+                        }
+                    ),
+                    use_container_width=True
+                )
             else:
                 st.write("推奨なし")
 
         with col_s:
             st.subheader("📉 売り推奨")
             if not sells.empty:
-                st.dataframe(sells[["name", "code", "price", "rsi", "resistance", "support"]], use_container_width=True)
+                # ここでカラム名を日本語に変更して表示
+                st.dataframe(
+                    sells[["name", "code", "price", "rsi", "resistance", "support"]].rename(
+                        columns={
+                            "name": "銘柄名",
+                            "code": "コード",
+                            "price": "現在値",
+                            "rsi": "RSI",
+                            "resistance": "損切目安",
+                            "support": "利確目標"
+                        }
+                    ),
+                    use_container_width=True
+                )
             else:
                 st.write("推奨なし")
     else:
