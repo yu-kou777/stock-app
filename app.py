@@ -1,36 +1,56 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 
 # ==========================================
-# ⚙️ 設定エリア
+# ⚙️ バリュー株（低PBR・高配当）厳選リスト
+# ==========================================
+SECTOR_TICKERS = {
+    "銀行・金融 (低PBRの宝庫)": {
+        "8306.T": "三菱UFJ", "8316.T": "三井住友", "8411.T": "みずほ", "8591.T": "オリックス",
+        "8604.T": "野村HD", "8766.T": "東京海上", "8725.T": "MS&AD", "8750.T": "第一生命",
+        "7182.T": "ゆうちょ", "8308.T": "りそな", "8309.T": "三井住友トラ"
+    },
+    "商社・卸売 (割安・高配当)": {
+        "8001.T": "伊藤忠", "8002.T": "丸紅", "8031.T": "三井物産", "8053.T": "住友商事",
+        "8058.T": "三菱商事", "2768.T": "双日", "8015.T": "豊田通商", "8020.T": "兼松"
+    },
+    "鉄鋼・非鉄・素材 (景気敏感)": {
+        "5401.T": "日本製鉄", "5411.T": "JFE", "5406.T": "神戸製鋼", "5713.T": "住友鉱山",
+        "5714.T": "DOWA", "5706.T": "三井金", "3407.T": "旭化成", "4005.T": "住友化学",
+        "4183.T": "三井化学", "4208.T": "UBE", "5020.T": "ENEOS", "1605.T": "INPEX"
+    },
+    "建設・不動産 (内需バリュー)": {
+        "1801.T": "大成建設", "1802.T": "大林組", "1803.T": "清水建設", "1812.T": "鹿島",
+        "1925.T": "大和ハウス", "1928.T": "積水ハウス", "8801.T": "三井不動産",
+        "8802.T": "三菱地所", "8830.T": "住友不動産", "3289.T": "東急不HD"
+    },
+    "自動車・輸送機 (円安恩恵)": {
+        "7203.T": "トヨタ", "7267.T": "ホンダ", "7201.T": "日産自", "7270.T": "SUBARU",
+        "7269.T": "スズキ", "7272.T": "ヤマハ発", "7011.T": "三菱重工", "7012.T": "川崎重工",
+        "7013.T": "IHI"
+    },
+    "通信・インフラ (安定収益)": {
+        "9432.T": "NTT", "9433.T": "KDDI", "9434.T": "ソフトバンク", "9501.T": "東電HD",
+        "9503.T": "関西電力", "9531.T": "東京ガス", "9532.T": "大阪ガス",
+        "9020.T": "JR東", "9021.T": "JR西", "9022.T": "JR東海", "9101.T": "日本郵船",
+        "9104.T": "商船三井", "9107.T": "川崎汽船"
+    }
+}
+
+# 全銘柄リストの作成
+ALL_TICKERS = {}
+for sector, tickers in SECTOR_TICKERS.items():
+    ALL_TICKERS.update(tickers)
+
+# ==========================================
+# 🧠 テクニカル分析ロジック
 # ==========================================
 
-# 監視対象：日経225主要銘柄（動作軽量化のため選抜）
-TICKERS = [
-    "7203.T", "9984.T", "8306.T", "6758.T", "6861.T", "6920.T", "6098.T", "8035.T",
-    "4063.T", "7974.T", "9432.T", "8058.T", "7267.T", "4502.T", "6501.T", "7741.T",
-    "6367.T", "6902.T", "4543.T", "3382.T", "4519.T", "6273.T", "6954.T", "7269.T",
-    "9101.T", "9104.T", "9107.T", "5401.T", "8316.T", "8411.T", "8766.T", "8801.T",
-    "1605.T", "1925.T", "2413.T", "2502.T", "2801.T", "2914.T", "3407.T", "4503.T",
-    "4507.T", "4523.T", "4568.T", "4578.T", "4661.T", "4901.T", "4911.T", "5020.T",
-    "5108.T", "5713.T", "6146.T", "6301.T", "6326.T", "6503.T", "6594.T", "6702.T",
-    "6723.T", "6752.T", "6762.T", "6857.T", "6971.T", "6981.T", "7011.T", "7201.T",
-    "7270.T", "7272.T", "7733.T", "7751.T", "7832.T", "8001.T", "8002.T", "8015.T",
-    "8031.T", "8053.T", "8604.T", "8630.T", "8725.T", "8750.T", "8802.T", "8830.T",
-    "9020.T", "9021.T", "9022.T", "9202.T", "9735.T", "9843.T", "9983.T"
-]
-
-# ==========================================
-# 🧠 高度テクニカル分析ロジック
-# ==========================================
-
-def get_advanced_analysis(ticker):
+def get_analysis(ticker, name):
     try:
         stock = yf.Ticker(ticker)
-        # 過去6ヶ月分のデータ取得
         df = stock.history(period="6mo")
         if len(df) < 60: return None
 
@@ -38,123 +58,129 @@ def get_advanced_analysis(ticker):
         high = df['High']
         low = df['Low']
         
-        # --- 1. RSI (14日) とその傾き ---
+        # --- 1. RSI (14日) ---
         delta = close.diff()
         gain = (delta.where(delta > 0, 0)).rolling(14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
         rsi = 100 - (100 / (1 + gain/loss))
+        curr_rsi = rsi.iloc[-1]
         
-        # RSIの傾き（現在値 - 3日前）: 上向いているかチェック
-        rsi_slope = rsi.iloc[-1] - rsi.iloc[-4]
-
-        # --- 2. MACD ヒストグラム（予兆検知） ---
+        # --- 2. MACD ヒストグラム ---
         ema12 = close.ewm(span=12, adjust=False).mean()
         ema26 = close.ewm(span=26, adjust=False).mean()
         macd_line = ema12 - ema26
         signal_line = macd_line.ewm(span=9, adjust=False).mean()
-        
-        # ヒストグラム（MACDとシグナルの距離）
-        histogram = macd_line - signal_line
-        
-        # ヒストグラムの変化率（縮小しているか？）
-        hist_now = histogram.iloc[-1]
-        hist_prev = histogram.iloc[-2]
-        hist_change = hist_now - hist_prev  # プラスなら好転の兆し
+        hist_now = macd_line.iloc[-1] - signal_line.iloc[-1]
+        hist_change = hist_now - (macd_line.iloc[-2] - signal_line.iloc[-2])
 
-        # --- 3. 抵抗線・支持線の計算（直近20日の高値・安値） ---
-        resistance = high.rolling(20).max().iloc[-1] # 直近の高値（売り目標）
-        support = low.rolling(20).min().iloc[-1]     # 直近の安値（損切りライン）
-        
+        # --- 3. 抵抗線・支持線 ---
+        resistance = high.rolling(50).max().iloc[-1] # バリュー株は動きが遅いので50日高値を意識
+        support = low.rolling(50).min().iloc[-1]
         curr_price = close.iloc[-1]
 
-        # 判定結果をまとめる
+        # --- 4. スコアリング ---
+        score = 50
+        # バリュー株の「押し目買い」ロジック
+        if curr_rsi < 35: score += 20     # 売られすぎ
+        elif curr_rsi < 45: score += 10
+        
+        if hist_now < 0 and hist_change > 0: score += 15 # 反発の兆し
+        
+        # バリュー株の「戻り売り」ロジック
+        if curr_rsi > 75: score -= 20
+        elif curr_rsi > 65: score -= 10
+        
         return {
-            "code": ticker,
+            "name": name,
+            "code": ticker.replace(".T", ""),
             "price": curr_price,
-            "rsi": rsi.iloc[-1],
-            "rsi_slope": rsi_slope,
-            "hist_now": hist_now,
-            "hist_change": hist_change,
+            "rsi": curr_rsi,
+            "score": score,
             "resistance": resistance,
             "support": support,
-            "upside": resistance - curr_price # 上値余地
+            "signal": "買い" if score >= 70 else ("売り" if score <= 30 else "様子見")
         }
     except:
         return None
 
-def run_prediction_scan(min_p, max_p):
-    buy_candidates = []
-    sell_candidates = []
+def run_scan(target_tickers, min_p, max_p):
+    results = []
+    
+    # 辞書からリストへ変換
+    scan_list = list(target_tickers.keys())
     
     with ThreadPoolExecutor(max_workers=10) as executor:
-        results = list(executor.map(get_advanced_analysis, TICKERS))
-    
-    for d in results:
-        if d is None: continue
-        if not (min_p <= d["price"] <= max_p): continue
-        
-        # --- 買いの予兆判定 (Pre-Bullish) ---
-        # 1. MACDはまだマイナス圏だが、ヒストグラムが増加中（赤色が薄くなってきた状態）
-        # 2. RSIが低い位置(45以下)から上向き(slope > 0)に転じている
-        if (d["hist_now"] < 0 and d["hist_change"] > 0) and (d["rsi"] < 45 and d["rsi_slope"] > 0):
-            d["signal_type"] = "買い予兆"
-            d["comment"] = "反発開始の気配あり"
-            buy_candidates.append(d)
-
-        # --- 売りの予兆判定 (Pre-Bearish) ---
-        # 1. MACDはプラス圏だが、ヒストグラムが減少中（上昇力が弱まってきた）
-        # 2. RSIが高い位置(60以上)から下向きに転じている
-        elif (d["hist_now"] > 0 and d["hist_change"] < 0) and (d["rsi"] > 60 and d["rsi_slope"] < 0):
-            d["signal_type"] = "売り予兆"
-            d["comment"] = "天井打ちの気配あり"
-            sell_candidates.append(d)
-
-    return buy_candidates, sell_candidates
+        futures = [executor.submit(get_analysis, t, target_tickers[t]) for t in scan_list]
+        for f in futures:
+            res = f.result()
+            if res and (min_p <= res["price"] <= max_p):
+                results.append(res)
+                
+    return results
 
 # ==========================================
-# 📱 アプリ画面設計
+# 📱 アプリ画面 UI
 # ==========================================
 
-st.set_page_config(page_title="先読みAIチャート", layout="wide")
-st.title("🦅 先読みAIチャート (Early Entry)")
-st.caption("MACDクロス前の「予兆」と「抵抗線」を可視化")
+st.set_page_config(page_title="バリュー株スカウター", layout="wide")
+st.title("💎 バリュー株スカウター (低PBR特化)")
+st.caption("東証プライム・スタンダードの「割安・高配当」銘柄からチャンスを探します")
 
-# 設定エリア
+# --- サイドバーで業種選択 ---
+st.sidebar.header("📂 業種フィルター")
+selected_sectors = []
+for sector in SECTOR_TICKERS.keys():
+    if st.sidebar.checkbox(sector, value=True):
+        selected_sectors.append(sector)
+
+# 選択された業種の銘柄だけを抽出
+target_dict = {}
+for s in selected_sectors:
+    target_dict.update(SECTOR_TICKERS[s])
+
+# --- メイン画面設定 ---
 col1, col2 = st.columns([1, 2])
 with col1:
-    st.write("##### 💰 価格帯設定")
-    p_min = st.number_input("下限 (円)", value=1000, step=100)
+    st.write("##### 💰 価格帯")
+    p_min = st.number_input("下限 (円)", value=100, step=100)
     p_max = st.number_input("上限 (円)", value=10000, step=100)
+    
 with col2:
-    st.write("##### 📊 分析概要")
-    st.info("クロスが発生してからでは遅いため、RSIの反転とMACDの幅(ヒストグラム)の縮小を検知して、トレンドの初動を狙います。")
+    st.info(f"現在、**{len(target_dict)}銘柄** が監視対象です。\n左上の「＞」メニューから業種を絞り込めます。")
 
-if st.button("🚀 先読みスキャン開始", use_container_width=True):
-    with st.spinner('全銘柄の「気配」を分析中...'):
-        buys, sells = run_prediction_scan(p_min, p_max)
+if st.button("🚀 割安株をスキャン開始", use_container_width=True):
+    with st.spinner('バリュー株の状況を確認中...'):
+        data = run_scan(target_dict, p_min, p_max)
+    
+    # --- 結果の整理 ---
+    df = pd.DataFrame(data)
+    
+    if not df.empty:
+        # 買い推奨（スコア高い順）
+        buys = df[df["score"] >= 65].sort_values("score", ascending=False)
+        # 売り推奨（スコア低い順）
+        sells = df[df["score"] <= 35].sort_values("score", ascending=True)
 
-    # --- 買いチャンス表示 ---
-    st.subheader(f"📈 買いの予兆あり ({len(buys)}件)")
-    if buys:
-        # 表示用データフレーム作成
-        df_b = pd.DataFrame(buys)
-        # 見やすいように列を選んでリネーム
-        display_b = df_b[["code", "price", "rsi", "resistance", "support", "comment"]]
-        display_b.columns = ["銘柄", "現在値", "RSI", "売却目標(抵抗線)", "損切目安(支持線)", "AIコメント"]
-        st.dataframe(display_b, use_container_width=True)
+        st.subheader("🔥 買いチャンス (押し目・反発狙い)")
+        if not buys.empty:
+            st.dataframe(
+                buys[["name", "code", "price", "rsi", "resistance", "support"]].rename(
+                    columns={"name":"銘柄", "code":"コード", "price":"現在値", "rsi":"RSI", "resistance":"上値目処", "support":"下値目処"}
+                ), 
+                use_container_width=True
+            )
+        else:
+            st.write("現在、明確な買いシグナルはありません。")
+
+        st.subheader("🧊 売りチャンス (過熱感あり)")
+        if not sells.empty:
+            st.dataframe(
+                sells[["name", "code", "price", "rsi", "support", "resistance"]].rename(
+                    columns={"name":"銘柄", "code":"コード", "price":"現在値", "rsi":"RSI", "support":"下値目処", "resistance":"上値目処"}
+                ),
+                use_container_width=True
+            )
+        else:
+            st.write("現在、明確な売りシグナルはありません。")
     else:
-        st.write("現在、明確な買い予兆は見つかりません。")
-
-    # --- 売りチャンス表示 ---
-    st.subheader(f"📉 空売りの予兆あり ({len(sells)}件)")
-    if sells:
-        df_s = pd.DataFrame(sells)
-        display_s = df_s[["code", "price", "rsi", "support", "resistance", "comment"]]
-        display_s.columns = ["銘柄", "現在値", "RSI", "買戻目安(支持線)", "上値抵抗線", "AIコメント"]
-        st.dataframe(display_s, use_container_width=True)
-    else:
-        st.write("現在、明確な売り予兆は見つかりません。")
-
-    st.write("---")
-    st.caption("※抵抗線：直近20日間の最高値（ここまでは上がる余地があるが、ここを超えると重い）")
-    st.caption("※支持線：直近20日間の最安値（ここを割ると危険なため損切りの目安になる）")
+        st.warning("条件に合う銘柄が見つかりませんでした。価格帯などを変更してみてください。")
