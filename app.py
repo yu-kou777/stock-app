@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 
 # ==========================================
-# 🛡️ 銘柄マスタ (主要・貸借銘柄)
+# 🛡️ 銘柄マスタ
 # ==========================================
 NAME_MAP = {
     "7203.T": "トヨタ", "9984.T": "SBG", "8306.T": "三菱UFJ", "6758.T": "ソニーG",
@@ -22,7 +22,7 @@ NAME_MAP = {
 }
 
 # ==========================================
-# 🌐 決算日チェック (株探連動)
+# 🌐 決算日チェック
 # ==========================================
 def scrape_earnings_date(code):
     clean_code = code.replace(".T", "")
@@ -56,7 +56,7 @@ def detect_patterns(df, rsi):
     elif curr_price > ma5 * 1.005: trend = "📈上昇(買い)"
     else: trend = "☁️拮抗"
 
-    # --- 買いパターン (RSI < 60) ---
+    # 買いパターン
     if rsi < 60:
         l = low.tail(15).values
         if l.min() == l[5:10].min() and l[0:5].min() > l[5:10].min() and l[10:15].min() > l[5:10].min():
@@ -66,7 +66,7 @@ def detect_patterns(df, rsi):
             close.iloc[-1] > df['Open'].iloc[-1]):
             return "🌅明けの明星", 90, trend, "buy"
 
-    # --- 売りパターン (RSI > 40) ---
+    # 売りパターン
     if rsi > 40:
         h = high.tail(15).values
         if h.max() == h[5:10].max() and h[0:5].max() < h[5:10].max() and h[10:15].max() < h[5:10].max():
@@ -79,7 +79,7 @@ def detect_patterns(df, rsi):
     return None, 0, trend, "neutral"
 
 # ==========================================
-# 🧠 分析ロジック (価格帯フィルタ対応)
+# 🧠 分析ロジック
 # ==========================================
 def get_analysis(ticker, name, min_p, max_p):
     try:
@@ -88,7 +88,7 @@ def get_analysis(ticker, name, min_p, max_p):
         if len(hist) < 30: return None
         curr_price = hist["Close"].iloc[-1]
         
-        # 🟢 価格帯フィルター (ここで除外)
+        # 価格帯フィルター
         if not (min_p <= curr_price <= max_p): return None
 
         # RSI計算
@@ -105,23 +105,23 @@ def get_analysis(ticker, name, min_p, max_p):
         golden_cross = (macd.iloc[-2] < signal.iloc[-2]) and (macd.iloc[-1] > signal.iloc[-1])
         dead_cross = (macd.iloc[-2] > signal.iloc[-2]) and (macd.iloc[-1] < signal.iloc[-1])
         
-        # --- 戦略数値 (利確・抵抗線) ---
-        res_line = int(hist['High'].tail(25).max()) # 抵抗線(25日高値)
-        sup_line = int(hist['Low'].tail(25).min())  # 支持線(25日安値)
+        # --- 戦略数値 (利確・損切) ---
+        res_line = int(hist['High'].tail(25).max()) # 抵抗線
+        sup_line = int(hist['Low'].tail(25).min())  # 支持線
 
-        # 買いの場合: 抵抗線が近すぎる(+1%未満)なら、+5%を目標にする
+        # 買い目標 (利確: +5% or 抵抗線 / 損切: -3%)
         if res_line < curr_price * 1.01:
             buy_tp = int(curr_price * 1.05)
         else:
             buy_tp = res_line
-        buy_sl = int(curr_price * 0.97) # -3%で撤退
+        buy_sl = int(curr_price * 0.97)
 
-        # 売りの場合: 支持線が近すぎるなら、-5%を目標にする
+        # 売り目標 (利確: -5% or 支持線 / 損切: +3%)
         if sup_line > curr_price * 0.99:
             sell_tp = int(curr_price * 0.95)
         else:
             sell_tp = sup_line
-        sell_sl = int(curr_price * 1.03) # +3%で撤退
+        sell_sl = int(curr_price * 1.03)
 
         earn_date = scrape_earnings_date(ticker)
         p_name, p_score, trend, sig_type = detect_patterns(hist, rsi)
@@ -167,11 +167,12 @@ def get_analysis(ticker, name, min_p, max_p):
 # 📱 アプリ表示
 # ==========================================
 st.set_page_config(page_title="最強株スキャナー・完全版", layout="wide")
-st.title("🦅 最強株スキャナー (価格フィルタ・利確目標付き)")
+st.title("🦅 最強株スキャナー (買い戦略特化)")
 
 # --- 1. 個別診断 ---
 st.header("🔍 個別銘柄ピンポイント診断")
-code_in = st.text_input("コード (例: 8306)", "").strip()
+code_in = st.text_input("コード (例: 7203)", "").strip()
+
 if code_in:
     full_c = code_in + ".T" if ".T" not in code_in else code_in
     d_name = NAME_MAP.get(full_c)
@@ -179,50 +180,46 @@ if code_in:
         try: d_name = yf.Ticker(full_c).info.get('longName', code_in)
         except: d_name = code_in
     
-    with st.spinner("現在値と目標株価を計算中..."):
-        # 個別診断時は価格フィルタ無効(0〜1000万円)
+    with st.spinner("戦略データを計算中..."):
+        # 個別診断時は価格フィルタ無効
         r = get_analysis(full_c, d_name, 0, 10000000)
     
     if r:
         st.subheader(f"📊 {r['銘柄名']} ({r['コード']})")
         
         if r["is_risk"]:
-            st.error(f"🛑 {r['決算']} のため取引禁止")
+            st.error(f"🛑 {r['決算']} のため、現在は取引を控えるべきです。")
         else:
-            # 🟢 メイン情報 (現在値・判定)
+            # カラム1: 現在の状況
             c1, c2, c3 = st.columns(3)
             with c1:
                 st.metric("現在値", f"{r['現在値']}円", delta=r['勢い'])
                 if r['buy_score'] >= 50: 
-                    st.success("判定: 買い推奨 🚀")
+                    st.success("AI判定: 買い推奨 🚀")
                 elif r['sell_score'] >= 50: 
-                    st.error("判定: 空売り推奨 📉")
+                    st.error("AI判定: 空売り推奨 📉")
                 else: 
-                    st.info("判定: 様子見 ☕")
+                    st.info("AI判定: 様子見 ☕")
 
-            # 🟢 目標株価 (利確・損切)
+            # カラム2: 買いで入る場合の戦略 (常に表示)
             with c2:
-                if r['buy_score'] >= r['sell_score']:
-                    st.metric("利確目標 (Target)", f"{r['buy_tp']}円", help="直近の高値、または+5%")
-                    st.metric("損切目安 (Stop)", f"{r['buy_sl']}円", delta_color="inverse")
-                else:
-                    st.metric("空売り目標 (Target)", f"{r['sell_tp']}円", delta_color="inverse", help="直近の安値、または-5%")
-                    st.metric("損切目安 (Stop)", f"{r['sell_sl']}円")
+                st.markdown("##### 🐂 買いエントリー戦略")
+                st.metric("利確目標 (Target)", f"{r['buy_tp']}円", help="直近高値または+5%")
+                st.metric("損切目安 (Stop)", f"{r['buy_sl']}円", delta="-3%", delta_color="inverse", help="エントリーから-3%")
 
-            # 🟢 テクニカル詳細
+            # カラム3: テクニカル指標
             with c3:
                 st.write(f"**RSI:** {r['RSI']}")
                 st.write(f"**MACD:** {r['MACD']}")
                 st.write(f"**サイン:** {r['パターン']}")
-                st.caption(f"決算リスク: {r['決算']}")
+                st.caption(f"抵抗線(上値): {r['res_line']}円")
     else: st.error("取得失敗")
 
 st.divider()
 
-# --- 2. 一括スキャン (価格帯フィルタ復活) ---
+# --- 2. 一括スキャン ---
 st.header("🚀 市場全体スキャン (価格帯フィルタ)")
 
-# カラムで入力欄を整理
 col_filt1, col_filt2 = st.columns(2)
 with col_filt1:
     p_min_input = st.number_input("最低価格 (円)", value=1000, step=1000)
@@ -232,7 +229,6 @@ with col_filt2:
 if st.button("条件でスキャン開始", use_container_width=True):
     with st.spinner(f"{p_min_input}円 〜 {p_max_input}円 の銘柄を抽出中..."):
         with ThreadPoolExecutor(max_workers=5) as ex:
-            # ここで価格フィルタを適用
             fs = [ex.submit(get_analysis, t, n, p_min_input, p_max_input) for t, n in NAME_MAP.items()]
             ds = [f.result() for f in fs if f.result()]
     
@@ -243,7 +239,6 @@ if st.button("条件でスキャン開始", use_container_width=True):
             st.subheader("🔥 買い推奨")
             bs = df[df["buy_score"] >= 50].sort_values("buy_score", ascending=False)
             if not bs.empty:
-                # 必要なカラムに絞って表示
                 st.dataframe(bs[["コード","銘柄名","現在値","buy_tp","buy_sl","勢い"]].rename(
                     columns={"buy_tp":"利確目標", "buy_sl":"損切目安"}
                 ), hide_index=True)
@@ -257,5 +252,4 @@ if st.button("条件でスキャン開始", use_container_width=True):
                 ), hide_index=True)
             else: st.info("なし")
     else:
-        st.warning("条件に合う銘柄が見つかりませんでした。価格帯を広げてみてください。")
-
+        st.warning("条件に合う銘柄が見つかりませんでした。")
