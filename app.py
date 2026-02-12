@@ -72,81 +72,38 @@ def get_tickers_safe():
     return tickers_dict
 
 # ==========================================
-# 🕯️ ローソク足パターン認識ロジック
+# 🕯️ ローソク足パターン認識
 # ==========================================
 def detect_candle_pattern(df):
-    """
-    直近3日間のデータから、強力な反転シグナル（明けの明星など）を検出する
-    df: 最新3日分以上のDataFrame (Open, Close, High, Low)
-    戻り値: (シグナル名, スコア加点, タイプ 'buy' or 'sell' or None)
-    """
     if len(df) < 3: return None, 0, None
-    
-    # 直近3日のデータ取り出し
-    d1 = df.iloc[-3] # 2日前
-    d2 = df.iloc[-2] # 昨日
-    d3 = df.iloc[-1] # 今日 (最新)
-
-    # 実体（Body）とヒゲの計算
+    d1, d2, d3 = df.iloc[-3], df.iloc[-2], df.iloc[-1]
     body1 = abs(d1['Close'] - d1['Open'])
     body2 = abs(d2['Close'] - d2['Open'])
     body3 = abs(d3['Close'] - d3['Open'])
-    
-    # 陽線・陰線の判定
     is_green1 = d1['Close'] > d1['Open']
     is_green2 = d2['Close'] > d2['Open']
     is_green3 = d3['Close'] > d3['Open']
 
-    # --- 買いシグナル ---
-
-    # 1. 🌅 明けの明星 (Morning Star) [底打ち反転]
-    # 条件: 大陰線 -> 窓開け極小コマ(下) -> 大陽線(陰線の半値以上戻す)
-    is_morning_star = (
-        not is_green1 and body1 > d1['Open'] * 0.01 and # 1日目: 大陰線
-        body2 < body1 * 0.3 and # 2日目: 小さな実体
-        d2['Close'] < d1['Close'] and # ギャップダウン気味
-        is_green3 and body3 > body1 * 0.5 and # 3日目: 強い陽線
-        d3['Close'] > (d1['Open'] + d1['Close']) / 2 # 1日目の真ん中以上まで戻す
-    )
-    if is_morning_star:
+    # 1. 明けの明星
+    if (not is_green1 and body1 > d1['Open']*0.01 and body2 < body1*0.3 and 
+        d2['Close'] < d1['Close'] and is_green3 and body3 > body1*0.5 and 
+        d3['Close'] > (d1['Open']+d1['Close'])/2):
         return "🌅明けの明星", 50, "buy"
 
-    # 2. 📈 陽の包み足 (Bullish Engulfing) [強い買い]
-    # 条件: 陰線 -> 翌日がそれを包む大陽線
-    is_bull_engulfing = (
-        not is_green2 and # 昨日陰線
-        is_green3 and # 今日陽線
-        d3['Open'] < d2['Close'] and # 今日の始値が昨日の終値より下（または同等）
-        d3['Close'] > d2['Open'] and # 今日の終値が昨日の始値より上
-        body3 > body2 # 実体が大きい
-    )
-    if is_bull_engulfing:
+    # 2. 陽の包み足
+    if (not is_green2 and is_green3 and d3['Open'] < d2['Close'] and 
+        d3['Close'] > d2['Open'] and body3 > body2):
         return "📈陽の包み足", 30, "buy"
 
-    # --- 売りシグナル ---
-
-    # 3. 🌌 宵の明星 (Evening Star) [天井反転]
-    # 条件: 大陽線 -> 窓開け極小コマ(上) -> 大陰線
-    is_evening_star = (
-        is_green1 and body1 > d1['Open'] * 0.01 and # 1日目: 大陽線
-        body2 < body1 * 0.3 and # 2日目: 小さな実体
-        d2['Close'] > d1['Close'] and # ギャップアップ気味
-        not is_green3 and body3 > body1 * 0.5 and # 3日目: 強い陰線
-        d3['Close'] < (d1['Open'] + d1['Close']) / 2 # 1日目の真ん中以下まで下げる
-    )
-    if is_evening_star:
+    # 3. 宵の明星
+    if (is_green1 and body1 > d1['Open']*0.01 and body2 < body1*0.3 and 
+        d2['Close'] > d1['Close'] and not is_green3 and body3 > body1*0.5 and 
+        d3['Close'] < (d1['Open']+d1['Close'])/2):
         return "🌌宵の明星", 50, "sell"
 
-    # 4. 📉 陰の包み足 (Bearish Engulfing) [強い売り]
-    # 条件: 陽線 -> 翌日がそれを包む大陰線
-    is_bear_engulfing = (
-        is_green2 and # 昨日陽線
-        not is_green3 and # 今日陰線
-        d3['Open'] > d2['Close'] and # 今日の始値が昨日の終値より上
-        d3['Close'] < d2['Open'] and # 今日の終値が昨日の始値より下
-        body3 > body2
-    )
-    if is_bear_engulfing:
+    # 4. 陰の包み足
+    if (is_green2 and not is_green3 and d3['Open'] > d2['Close'] and 
+        d3['Close'] < d2['Open'] and body3 > body2):
         return "📉陰の包み足", 30, "sell"
 
     return None, 0, None
@@ -186,14 +143,13 @@ def get_analysis(ticker, name, min_p, max_p):
         hist_now = macd_line.iloc[-1] - signal_line.iloc[-1]
         hist_prev = macd_line.iloc[-2] - signal_line.iloc[-2]
 
-        # --- パターン認識 (New!) ---
+        # パターン認識
         pattern_name, pattern_score, pattern_type = detect_candle_pattern(df)
 
-        # テクニカルライン
+        # テクニカルライン & ターゲット計算
         resistance_line = high.rolling(25).max().iloc[-1]
         support_line = low.rolling(25).min().iloc[-1]
-
-        # ターゲット計算
+        
         buy_target_pct = curr_price * 1.07
         buy_stop_pct = curr_price * 0.95
         sell_target_pct = curr_price * 0.93
@@ -202,21 +158,33 @@ def get_analysis(ticker, name, min_p, max_p):
         buy_score = 0
         sell_score = 0
         
-        # 基本スコア
-        if curr_rsi < 30: buy_score += 40
-        elif curr_rsi < 40: buy_score += 20
-        if hist_now > hist_prev: buy_score += 20
-        if hist_now < 0 and hist_prev < 0: buy_score += 10
-        if curr_rsi > prev_rsi: buy_score += 10 
-        if curr_price <= support_line * 1.02: buy_score += 10
-        
-        # パターン加点 (買い)
-        if pattern_type == "buy":
-            buy_score += pattern_score # 激アツなら+50点
+        # ----------------------------------------
+        # 🛑 安全装置 (Safety Filter)
+        # ----------------------------------------
+        # 買い推奨の絶対条件: RSI < 60
+        # (これを超えていたら、どんなに強いシグナルでも買わない)
+        if curr_rsi < 60:
+            # 基本スコア
+            if curr_rsi < 30: buy_score += 40
+            elif curr_rsi < 40: buy_score += 20
+            
+            if hist_now > hist_prev: buy_score += 20
+            if hist_now < 0 and hist_prev < 0: buy_score += 10
+            if curr_rsi > prev_rsi: buy_score += 10 
+            if curr_price <= support_line * 1.02: buy_score += 10
+            
+            # パターン加点 (買い)
+            if pattern_type == "buy":
+                buy_score += pattern_score
+        else:
+            # RSIが高い場合は買いスコア強制ゼロ
+            buy_score = 0
 
-        # 基本スコア (売り)
+        # --- 売り推奨のスコア計算 (変更なし) ---
+        # 売りはRSIが高いほうが良いので、制限は不要
         if curr_rsi > 70: sell_score += 40
         elif curr_rsi > 60: sell_score += 20
+        
         if hist_now < hist_prev: sell_score += 20
         if hist_now > 0 and hist_prev > 0: sell_score += 10
         if curr_rsi < prev_rsi: sell_score += 10
@@ -226,7 +194,6 @@ def get_analysis(ticker, name, min_p, max_p):
         if pattern_type == "sell":
             sell_score += pattern_score
 
-        # シグナル名 (なければハイフン)
         signal_display = pattern_name if pattern_name else "-"
 
         return {
@@ -236,7 +203,7 @@ def get_analysis(ticker, name, min_p, max_p):
             "rsi": curr_rsi,
             "buy_score": buy_score,
             "sell_score": sell_score,
-            "signal": signal_display, # 表示用
+            "signal": signal_display,
             "buy_target_pct": buy_target_pct,
             "resistance": resistance_line,
             "sell_target_pct": sell_target_pct,
@@ -270,8 +237,8 @@ def run_scan(min_p, max_p):
 # 📱 アプリ画面 UI
 # ==========================================
 st.set_page_config(page_title="最強株スキャナー", layout="wide")
-st.title("🦅 最強株スキャナー (チャートパターン搭載)")
-st.caption("RSI/MACD ＋ 酒田五法（明星・包み足）を自動検知")
+st.title("🦅 最強株スキャナー (安全装置付き)")
+st.caption("RSI 60未満の安全圏 × 強力シグナルのみを厳選")
 
 col1, col2 = st.columns([1, 2])
 with col1:
@@ -279,11 +246,10 @@ with col1:
     p_min = st.number_input("下限 (円)", value=1000, step=100)
     p_max = st.number_input("上限 (円)", value=15000, step=100)
 with col2:
-    st.write("##### 🕯️ 注目のシグナル")
+    st.write("##### 🛡️ 高値掴み防止機能")
     st.info("""
-    **🌅明けの明星 / 🌌宵の明星**: トレンド転換の強力なサイン
-    **📈陽の包み足 / 📉陰の包み足**: 強い勢いを示すサイン
-    ※これらのサインが出た銘柄はスコアが跳ね上がります。
+    **買い推奨の絶対ルール**: RSI < 60 の銘柄のみ表示します。
+    (いくら強いシグナルが出ていても、過熱感がある銘柄は除外されます)
     """)
 
 if st.button("🚀 スキャン開始", use_container_width=True):
@@ -296,7 +262,7 @@ if st.button("🚀 スキャン開始", use_container_width=True):
 
         col_b, col_s = st.columns(2)
         with col_b:
-            st.subheader("🔥 買い推奨 (シグナル重視)")
+            st.subheader("🔥 買い推奨 (安全圏のみ)")
             if not buys.empty:
                 st.dataframe(
                     buys[["name", "signal", "price", "rsi", "buy_target_pct", "resistance"]].rename(
@@ -312,10 +278,10 @@ if st.button("🚀 スキャン開始", use_container_width=True):
                     use_container_width=True
                 )
             else:
-                st.write("推奨なし")
+                st.write("推奨なし (安全な買い場が見つかりません)")
 
         with col_s:
-            st.subheader("📉 売り推奨 (シグナル重視)")
+            st.subheader("📉 売り推奨")
             if not sells.empty:
                 st.dataframe(
                     sells[["name", "signal", "price", "rsi", "sell_target_pct", "support"]].rename(
