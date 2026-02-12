@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 
 # ==========================================
-# 🛡️ 銘柄マスタ & 設定
+# 🛡️ 銘柄マスタ
 # ==========================================
 NAME_MAP = {
     "7203.T": "トヨタ", "9984.T": "SBG", "8306.T": "三菱UFJ", "6758.T": "ソニーG",
@@ -41,35 +41,30 @@ def scrape_earnings_date(code):
 # ==========================================
 def detect_premium_patterns(df):
     if len(df) < 20: return None, 0, "判定不能"
-    
     close, high, low = df['Close'], df['High'], df['Low']
     ma5 = close.rolling(5).mean().iloc[-1]
     curr_price = close.iloc[-1]
     
-    # トレンド判定
     if curr_price > ma5 * 1.02: trend = "📈 強気上昇"
     elif curr_price < ma5 * 0.98: trend = "📉 弱気下降"
-    else: trend = "☁️ 横ばい/もみ合い"
+    else: trend = "☁️ 横ばい"
 
-    # --- 画像のパターン認識 ---
     # 逆三尊 (Aランク)
     low_vals = low.tail(15).values
-    if low_vals.min() == low_vals[5:10].min() and low_vals[0:5].min() > low_vals[5:10].min() and low_vals[10:15].min() > low_vals[5:10].min():
-        return "💎 逆三尊(A級)", 80, "🚀 反転上昇"
+    if len(low_vals) == 15:
+        if low_vals.min() == low_vals[5:10].min() and low_vals[0:5].min() > low_vals[5:10].min() and low_vals[10:15].min() > low_vals[5:10].min():
+            return "💎 逆三尊(A級)", 80, "🚀 反転上昇"
 
     # 三尊 (Aランク)
     high_vals = high.tail(15).values
-    if high_vals.max() == high_vals[5:10].max() and high_vals[0:5].max() < high_vals[5:10].max() and high_vals[10:15].max() < high_vals[5:10].max():
-        return "💀 三尊(A級)", 80, "🌊 下落転換"
-
-    # 三川明けの明星 (1級)
-    if (close.iloc[-3] < df['Open'].iloc[-3] and abs(close.iloc[-2]-df['Open'].iloc[-2]) < abs(close.iloc[-3]-df['Open'].iloc[-3])*0.2 and close.iloc[-1] > df['Open'].iloc[-1]):
-        return "🌅 明けの明星(1級)", 90, "🚀 強気反発"
+    if len(high_vals) == 15:
+        if high_vals.max() == high_vals[5:10].max() and high_vals[0:5].max() < high_vals[5:10].max() and high_vals[10:15].max() < high_vals[5:10].max():
+            return "💀 三尊(A級)", 80, "🌊 下落転換"
 
     return None, 0, trend
 
 # ==========================================
-# 🧠 分析・防衛ロジック
+# 🧠 分析ロジック
 # ==========================================
 def get_analysis(ticker, name, min_p=0, max_p=1000000):
     try:
@@ -79,7 +74,6 @@ def get_analysis(ticker, name, min_p=0, max_p=1000000):
         curr_price = hist["Close"].iloc[-1]
         if not (min_p <= curr_price <= max_p): return None
 
-        # RSI計算
         delta = hist['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
@@ -98,10 +92,10 @@ def get_analysis(ticker, name, min_p=0, max_p=1000000):
             if curr_rsi < 60: # 安全装置
                 if curr_rsi < 35: buy_score += 40
                 if "上昇" in trend_label: buy_score += 20
-                buy_score += pattern_score if "反転" in trend_label or "反発" in trend_label else 0
+                buy_score += pattern_score if "反転" in trend_label else 0
             if curr_rsi > 65:
                 sell_score += 40
-                if "下降" in trend_label or "三尊" in (pattern_name or ""): sell_score += pattern_score
+                if "下降" in trend_label: sell_score += pattern_score
 
         return {
             "コード": ticker.replace(".T", ""), "銘柄名": name, "現在値": int(curr_price),
@@ -120,35 +114,42 @@ st.title("🦅 最強株スキャナー ＆ 個別診断")
 # --- 1. 個別銘柄診断機能 ---
 st.header("🔍 個別銘柄ピンポイント診断")
 target_code = st.text_input("診断したい銘柄コードを入力（例：7203）", "").strip()
+
 if target_code:
     full_code = target_code + ".T" if ".T" not in target_code else target_code
-    res = get_analysis(full_code, "検索銘柄")
+    # 銘柄名マスタから取得、なければデフォルト名
+    display_name = NAME_MAP.get(full_code, f"銘柄コード: {target_code}")
+    
+    res = get_analysis(full_code, display_name)
     if res:
+        # 銘柄名を大きく表示
+        st.subheader(f"📊 {res['銘柄名']} ({res['コード']}) の診断結果")
+        
         col_res1, col_res2, col_res3 = st.columns(3)
         with col_res1:
-            st.metric("判定", "買い時" if res["buy_score"] >= 60 else "売り時" if res["sell_score"] >= 60 else "様子見")
-            st.write(f"**価格:** {res['現在値']}円")
+            st.metric("判定", "買い推奨" if res["buy_score"] >= 60 else "売り推奨" if res["sell_score"] >= 60 else "様子見")
+            st.write(f"**現在値:** {res['現在値']}円")
         with col_res2:
-            st.metric("トレンド", res["トレンド"])
-            st.write(f"**RSI:** {res['RSI']}")
+            st.metric("トレンド状況", res["トレンド"])
+            st.write(f"**RSI指標:** {res['RSI']}")
         with col_res3:
-            st.write(f"**特選サイン:** {res['パターン']}")
-            st.write(f"**決算リスク:** {'⚠️あり' if res['is_risk'] else '✅なし'} ({res['決算日']})")
+            st.write(f"**出現サイン:** {res['パターン']}")
+            st.write(f"**決算リスク:** {'⚠️警戒' if res['is_risk'] else '✅安全'} ({res['決算日']})")
         
         if res["is_risk"]:
-            st.warning("⚠️ 決算が近いため、テクニカルが良くてもエントリーは控えるのが安全です。")
+            st.error("⚠️ 決算が3日以内に控えています。テクニカルが良くても見送りを推奨します。")
     else:
-        st.error("銘柄データが取得できませんでした。コードを確認してください。")
+        st.error("データの取得に失敗しました。日本株の4桁コードを入力してください。")
 
 st.divider()
 
 # --- 2. 一括スキャナー機能 ---
-st.header("🚀 一括推奨スキャナー")
+st.header("🚀 監視リスト一括スキャン")
 col_p1, col_p2 = st.columns(2)
-with col_p1: p_min = st.number_input("下限価格", value=1000)
-with col_p2: p_max = st.number_input("上限価格", value=10000)
+with col_p1: p_min = st.number_input("最低価格 (円)", value=1000)
+with col_p2: p_max = st.number_input("最高価格 (円)", value=10000)
 
-if st.button("全銘柄スキャン開始", use_container_width=True):
+if st.button("全銘柄を一斉スキャン", use_container_width=True):
     with ThreadPoolExecutor(max_workers=5) as executor:
         futures = [executor.submit(get_analysis, t, n, p_min, p_max) for t, n in NAME_MAP.items()]
         data = [f.result() for f in futures if f.result() is not None]
@@ -157,10 +158,10 @@ if st.button("全銘柄スキャン開始", use_container_width=True):
         df = pd.DataFrame(data)
         c1, c2 = st.columns(2)
         with c1:
-            st.subheader("🔥 買い推奨 (RSI安全圏)")
+            st.subheader("🔥 買い時銘柄")
             st.dataframe(df[df["buy_score"] >= 60].sort_values("buy_score", ascending=False)[["コード", "銘柄名", "現在値", "RSI", "トレンド", "パターン"]], hide_index=True)
         with c2:
-            st.subheader("📉 売り推奨")
+            st.subheader("📉 売り時銘柄")
             st.dataframe(df[df["sell_score"] >= 60].sort_values("sell_score", ascending=False)[["コード", "銘柄名", "現在値", "RSI", "トレンド", "パターン"]], hide_index=True)
     else:
-        st.warning("該当銘柄なし")
+        st.info("現在、推奨条件に一致する銘柄はありません。")
