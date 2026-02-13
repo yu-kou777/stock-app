@@ -35,17 +35,49 @@ def scrape_earnings_date(code):
     return None
 
 # ==========================================
-# 🧠 精密分析ロジック (MACD + RSI + 反転フロア)
+# 🕯️ パターン判定 (反転・継続・保ち合い)
 # ==========================================
-def get_swing_analysis(ticker, name, min_p, max_p):
+def detect_complex_patterns(df, rsi):
+    if len(df) < 30: return None, 0, "neutral"
+    close, high, low, open_p = df['Close'], df['High'], df['Low'], df['Open']
+    curr_price = close.iloc[-1]
+
+    # --- 1. 継続：フラッグ ---
+    if all(high.iloc[i] < high.iloc[i-1] for i in range(-3, 0)) and \
+       (high.tail(5).max() - low.tail(5).min()) < (curr_price * 0.04):
+        return "🚩フラッグ(上昇中継)", 75, "buy"
+
+    # --- 2. 保ち合い：スクエア ---
+    if (high.tail(10).max() - low.tail(10).min()) / curr_price < 0.03:
+        return "📦スクエア(保ち合い)", 65, "neutral"
+
+    # --- 3. 反転：三空 / 明けの明星 / 逆三尊 ---
+    if rsi < 60:
+        if all(high.iloc[i] < low.iloc[i-1] for i in range(-3, 0)): return "🔥三空叩き込み", 100, "buy"
+        if (close.iloc[-3] < open_p.iloc[-3] and close.iloc[-1] > open_p.iloc[-1]): return "🌅明けの明星", 90, "buy"
+        l_vals = low.tail(15).values
+        if l_vals.min() == l_vals[5:10].min() and l_vals[0:5].min() > l_vals[5:10].min(): return "💎逆三尊", 80, "buy"
+
+    # --- 4. 売り：三尊 / 陰の包み足 ---
+    if rsi > 40:
+        h_vals = high.tail(15).values
+        if h_vals.max() == h_vals[5:10].max() and h_vals[0:5].max() < h_vals[5:10].max(): return "💀三尊(天井)", 85, "sell"
+        if (close.iloc[-2] > open_p.iloc[-2] and close.iloc[-1] < open_p.iloc[-2]): return "📉陰の包み足", 70, "sell"
+
+    return None, 0, "neutral"
+
+# ==========================================
+# 🧠 精密分析ロジック
+# ==========================================
+def get_analysis_data(ticker, name, min_p=0, max_p=10000000):
     try:
         stock = yf.Ticker(ticker)
-        hist = stock.history(period="6mo")
+        hist = stock.history(period="1y") # 余裕を持って1年分取得
         if len(hist) < 60: return None
         curr_price = int(hist["Close"].iloc[-1])
         if not (min_p <= curr_price <= max_p): return None
 
-        # 1. 指標計算 (MACD)
+        # MACD
         ema12 = hist['Close'].ewm(span=12, adjust=False).mean()
         ema26 = hist['Close'].ewm(span=26, adjust=False).mean()
         macd = ema12 - ema26
@@ -53,121 +85,108 @@ def get_swing_analysis(ticker, name, min_p, max_p):
         golden_cross = (macd.iloc[-2] < signal.iloc[-2]) and (macd.iloc[-1] > signal.iloc[-1])
         dead_cross = (macd.iloc[-2] > signal.iloc[-2]) and (macd.iloc[-1] < signal.iloc[-1])
 
-        # 2. 指標計算 (RSI)
+        # RSI
         delta = hist['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
         rsi = 100 - (100 / (1 + (gain / loss))).iloc[-1]
 
-        # 3. 反転フロア (BB-2σ & 60日安値)
+        # 床 (反転予測)
         ma20 = hist['Close'].rolling(20).mean()
         std20 = hist['Close'].rolling(20).std()
         floor = max(int(ma20.iloc[-1] - (std20.iloc[-1] * 2)), int(hist['Low'].tail(60).min()))
-        entry_target = int(floor * 1.01)
 
-        # 4. 判定フラグ
+        # パターン
+        p_name, p_score, sig_type = detect_complex_patterns(hist, rsi)
+        
+        # 決算リスク
         earn_date = scrape_earnings_date(ticker)
-        days_to_earn = (earn_date - datetime.now().date()).days if earn_date else 999
-        is_risk = (0 <= days_to_earn <= 3) # 決算3日前は盾発動
-        
-        # 💀 決算スナイパー (空売り)
-        is_earnings_short = (0 <= days_to_earn <= 14) and (rsi > 70 or (curr_price > ma20.iloc[-1]*1.07))
-        
-        # スコア判定 (RSI × MACD 複合)
-        buy_score, sell_score = 0, 0
+        days = (earn_date - datetime.now().date()).days if earn_date else 999
+        is_risk = (0 <= days <= 3)
+        is_earn_short = (0 <= days <= 14) and (rsi > 70 or curr_price > ma20.iloc[-1] * 1.07)
+
+        # スコア (MACD GCを重視)
+        buy_score = 0
         if not is_risk:
-            if rsi < 45: buy_score += 30
-            if golden_cross: buy_score += 40 # MACD転換を重視
-            if rsi > 65: sell_score += 30
-            if dead_cross: sell_score += 40
+            if rsi < 50: buy_score += 20
+            if golden_cross: buy_score += 50
+            if sig_type == "buy": buy_score += p_score
 
         return {
             "コード": ticker.replace(".T", ""), "銘柄名": name, "現在値": curr_price,
             "RSI": round(rsi, 1), "MACD": "GC(買い)" if golden_cross else "DC(売り)" if dead_cross else "継続",
-            "フロア": floor, "エントリー目安": entry_target,
-            "is_earnings_short": is_earnings_short, "buy_score": buy_score, "sell_score": sell_score,
-            "利確目標": int(hist['High'].tail(25).max()), "損切目安": int(floor * 0.97),
-            "決算": earn_date if earn_date else "未定", "is_risk": is_risk
+            "フロア": floor, "エントリー": int(floor * 1.01),
+            "パターン": p_name if p_name else "なし", "利確目標": int(hist['High'].tail(25).max()),
+            "損切目安": int(floor * 0.97), "決算": earn_date if earn_date else "未定",
+            "is_risk": is_risk, "is_earn_short": is_earn_short, "buy_score": buy_score
         }
     except: return None
 
 # ==========================================
-# 🐇 デイトレ分析 (5分足)
+# 🐇 デイトレ用 (5分足)
 # ==========================================
-def get_day_analysis(ticker):
+def get_day_data(ticker):
     try:
-        stock = yf.Ticker(ticker)
-        hist = stock.history(period="5d", interval="5m")
+        hist = yf.Ticker(ticker).history(period="5d", interval="5m")
         if len(hist) < 20: return None
         last_dt = hist.index[-1].astimezone(timezone(timedelta(hours=9)))
-        curr_price = int(hist["Close"].iloc[-1])
+        curr = int(hist["Close"].iloc[-1])
         ma20 = hist['Close'].rolling(20).mean().iloc[-1]
-        
         return {
-            "現在値": curr_price, "勢い": "⚡上昇" if curr_price > ma20 else "⚡下落",
-            "利確目標": int(curr_price * 1.015), "損切目安": int(curr_price * 0.99),
-            "time_str": last_dt.strftime('%m/%d %H:%M')
+            "現在値": curr, "勢い": "⚡上昇" if curr > ma20 else "⚡下落",
+            "利確": int(curr * 1.015), "損切": int(curr * 0.99), "時刻": last_dt.strftime('%H:%M')
         }
     except: return None
 
 # ==========================================
-# 📱 アプリ表示 (日本語表記)
+# 📱 アプリ画面
 # ==========================================
-st.set_page_config(page_title="最強株スキャナー・フルスペック版", layout="wide")
-st.title("🦅 最強株スキャナー (護身・特攻モデル)")
+st.set_page_config(page_title="最強株スキャナー・真・最終版", layout="wide")
+st.title("🦅 最強株スキャナー (全機能・全シグナル統合版)")
 
-code_in = st.text_input("銘柄コードを入力 (例: 6701)", "").strip()
+code_in = st.text_input("銘柄コードを入力", "").strip()
 if code_in:
     full_c = code_in + ".T" if ".T" not in code_in else code_in
-    d_name = NAME_MAP.get(full_c, code_in)
-    r = get_swing_analysis(full_c, d_name, 0, 10000000)
-    d = get_day_analysis(full_c)
-    
-    if r:
-        st.subheader(f"📊 {r['銘柄名']} ({r['コード']}) の精密診断")
-        if r["is_risk"]:
-            st.error(f"🛑 取引禁止！決算発表({r['決算']})が目前です。暴落リスクを回避してください。")
+    res = get_analysis_data(full_c, NAME_MAP.get(full_c, code_in))
+    day = get_day_data(full_c)
+    if res:
+        if res["is_risk"]: st.error(f"🛑 取引禁止：決算発表({res['決算']})が直前です。")
+        elif res["is_earn_short"]: st.warning(f"💀 空売り注目：決算前の異常な過熱が検出されました。")
         
-        t1, t2 = st.tabs(["🐢 スイング (日足)", "🐇 デイトレ (5分足)"])
-        with t1:
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                st.metric("現在値", f"{r['現在値']}円")
-                st.warning(f"🛡️ 反転予想フロア: {r['フロア']}円")
-            with c2:
-                st.success(f"指値(Entry)目安: {r['エントリー目安']}円")
-                st.metric("利確目標", f"{r['利確目標']}円")
-                st.metric("損切目安", f"{r['損切目安']}円", delta_color="inverse")
-            with c3:
-                st.metric("RSI", r['RSI'])
-                st.write(f"MACD状態: **{r['MACD']}**")
-                st.write(f"判定: **{'買い推奨 🚀' if r['buy_score']>=60 else '様子見 ☕'}**")
-
-        with t2:
-            if d:
-                st.info(f"📅 データ時刻: {d['time_str']}")
-                st.metric("5分足トレンド", d['勢い'], delta=f"{d['現在値']}円")
-                st.write(f"🎯 瞬間利確: {d['利確目標']}円 / 🛑 瞬間損切: {d['損切目安']}円")
+        tab1, tab2 = st.tabs(["🐢 スイング (反転・継続)", "🐇 デイトレ (瞬間)"])
+        with tab1:
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("現在値", f"{res['現在値']}円")
+                st.info(f"🛡️ 反転予想フロア: {res['フロア']}円")
+            with col2:
+                st.success(f"指値目安: {res['エントリー']}円")
+                st.metric("利確目標", f"{res['利確目標']}円")
+                st.metric("損切目安", f"{res['損切目安']}円", delta_color="inverse")
+            with col3:
+                st.write(f"判定: **{'買い推奨 🚀' if res['buy_score']>=70 else '様子見 ☕'}**")
+                st.write(f"出現サイン: **{res['パターン']}**")
+                st.write(f"MACD: **{res['MACD']}** / RSI: **{res['RSI']}**")
+        with tab2:
+            if day:
+                st.metric(f"5分足勢い ({day['時刻']})", day['勢い'], delta=f"{day['現在値']}円")
+                st.write(f"🎯 瞬間利確: {day['利確']}円 / 🛑 瞬間損切: {day['損切']}円")
 
 st.divider()
 
 if st.button("全銘柄を一斉スキャニング", use_container_width=True):
     with ThreadPoolExecutor(max_workers=5) as ex:
-        fs = [ex.submit(get_swing_analysis, t, n, 1000, 100000) for t, n in NAME_MAP.items()]
+        fs = [ex.submit(get_analysis_data, t, n) for t, n in NAME_MAP.items()]
         ds = [f.result() for f in fs if f.result()]
-    
     if ds:
         df = pd.DataFrame(ds)
-        
-        # 1. 💀 決算空売り
-        shorts = df[df["is_earnings_short"] == True]
+        # 💀 決算空売り
+        shorts = df[df["is_earn_short"] == True]
         if not shorts.empty:
-            st.subheader("💀 決算前・過熱空売り候補 (信用売りチャンス)")
+            st.subheader("💀 決算前・過熱空売り候補")
             st.dataframe(shorts[["コード","銘柄名","現在値","RSI","決算","利確目標"]].rename(columns={"利確目標":"空売り目標"}), hide_index=True)
-
-        # 2. 🔥 買い推奨
+        # 🔥 買い推奨
         st.subheader("🔥 買い推奨 (現物・信用買い)")
-        buys = df[df["buy_score"] >= 60].sort_values("buy_score", ascending=False)
-        st.dataframe(buys[["コード","銘柄名","現在値","RSI","MACD","利確目標","損切目安"]], hide_index=True)
-
+        buys = df[df["buy_score"] >= 70].sort_values("buy_score", ascending=False)
+        st.dataframe(buys[["コード","銘柄名","現在値","RSI","MACD","パターン","利確目標","損切目安"]], hide_index=True)
     else: st.warning("現在、推奨銘柄はありません。")
