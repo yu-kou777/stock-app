@@ -4,10 +4,9 @@ import pandas_ta as ta
 import streamlit as st
 
 # --- アプリ設定 ---
-st.set_page_config(layout="wide", page_title="Stock Scanner Hybrid-X (Stable)")
+st.set_page_config(layout="wide", page_title="Stock Scanner Hybrid-X (Full View)")
 
-# --- 銘柄データベース (市場全体モード用) ---
-# 主要銘柄リスト
+# --- 銘柄データベース ---
 MARKET_TICKERS = [
     "8035", "6920", "6857", "6723", "6758", "6501", "7735", "6701", "6702", "6503",
     "7203", "7267", "7270", "7201", "6301", "6367", "7011", "7012", "7013",
@@ -21,115 +20,74 @@ MARKET_TICKERS = [
     "2801", "2802", "2914", "9020", "9021", "9022", "9201", "9202", "9501", "9503"
 ]
 
-# --- サイドバー：操作盤 ---
+# --- サイドバー ---
 st.sidebar.title("🎛️ トモユキ専用・操作盤")
 
-# 1. 検索モード
-mode = st.sidebar.radio(
-    "戦術モード",
-    ("デイトレ (5分足)", "スイング (日足)")
-)
+mode = st.sidebar.radio("戦術モード", ("デイトレ (5分足)", "スイング (日足)"))
+search_source = st.sidebar.selectbox("検索対象", ("📝 自由入力 (自分のリスト)", "📊 市場全体 (日経225+主要株)"))
 
-# 2. 検索対象
-search_source = st.sidebar.selectbox(
-    "検索対象",
-    ("📝 自由入力 (自分のリスト)", "📊 市場全体 (日経225+主要株)")
-)
-
-# 3. 株価フィルタ
 st.sidebar.subheader("💰 株価フィルタ")
 col1, col2 = st.sidebar.columns(2)
-with col1:
-    min_price = st.number_input("下限 (円)", value=0, step=100)
-with col2:
-    max_price = st.number_input("上限 (円)", value=50000, step=100)
+min_price = col1.number_input("下限", value=0, step=100)
+max_price = col2.number_input("上限", value=50000, step=100)
 
-# 4. 銘柄リスト作成
 ticker_list = []
 if "自由入力" in search_source:
     st.sidebar.subheader("🔍 銘柄コード入力")
-    input_tickers = st.sidebar.text_area(
-        "数字だけでOK (例: 9101, 8306)",
-        "9101, 8306, 9984, 7203, 6920"
-    )
+    input_tickers = st.sidebar.text_area("数字だけでOK", "9101, 8306, 9984, 7203")
     raw_list = [x.strip() for x in input_tickers.split(',')]
     for t in raw_list:
         if t.isdigit(): ticker_list.append(f"{t}.T")
         elif t: ticker_list.append(t)
 else:
-    st.sidebar.info(f"主要 {len(MARKET_TICKERS)} 銘柄からサーチします")
+    st.sidebar.info(f"主要 {len(MARKET_TICKERS)} 銘柄を全チェックします")
     ticker_list = [f"{t}.T" for t in MARKET_TICKERS]
 
-# --- パターン認識ロジック ---
-def check_candle_patterns(df):
+# --- ヘルパー関数: データ整形の最終兵器 ---
+def flatten_data(df):
+    # MultiIndexのカラムを強制的に1段にする
+    if isinstance(df.columns, pd.MultiIndex):
+        try:
+            df.columns = df.columns.droplevel(1) 
+        except:
+            pass
+    return df
+
+def check_patterns(df):
     patterns = []
     try:
         latest = df.iloc[-1]
         prev = df.iloc[-2]
-        prev2 = df.iloc[-3]
+        body = abs(latest['Close'] - latest['Open'])
+        lower_shadow = min(latest['Open'], latest['Close']) - latest['Low']
         
-        # エラー対策: 値をfloatに強制変換
-        close_now = float(latest['Close'])
-        open_now = float(latest['Open'])
-        close_prev = float(prev['Close'])
-        open_prev = float(prev['Open'])
-        close_prev2 = float(prev2['Close'])
-        open_prev2 = float(prev2['Open'])
-        low_now = float(latest['Low'])
-
-        body = abs(close_now - open_now)
-        prev_body = abs(close_prev - open_prev)
-
-        # 明けの明星
-        if (close_prev2 < open_prev2) and \
-           (abs(close_prev - open_prev) < prev_body * 0.3) and \
-           (close_now > open_now and close_now > close_prev2):
-            patterns.append("✨明けの明星")
-        
-        # 下ヒゲピンバー
-        lower_shadow = min(open_now, close_now) - low_now
-        if lower_shadow > body * 2.5:
-            patterns.append("📌下ヒゲ")
-
-    except:
-        pass # 計算エラー時は無視
+        if lower_shadow > body * 2.5: patterns.append("📌下ヒゲ")
+        if latest['Close'] > latest['Open'] and body > abs(prev['Close'] - prev['Open']) * 2:
+            patterns.append("🔥大陽線")
+    except: pass
     return patterns
 
-# --- 解析エンジン (バグ修正版) ---
-def analyze_stock_hybrid(ticker, interval, min_p, max_p):
+# --- 解析エンジン ---
+def analyze_stock(ticker, interval, min_p, max_p):
     try:
-        # 市場全体モードの高速フィルタ
-        if "市場全体" in search_source:
-            # 1日分だけ取って価格チェック
-            fast_check = yf.download(ticker, period="1d", progress=False)
-            if len(fast_check) == 0: return None
-            
-            # 【重要】ここが修正ポイント: .iloc[-1].item() で確実に数字にする
-            try:
-                curr_check = float(fast_check['Close'].iloc[-1])
-            except:
-                curr_check = float(fast_check['Close'].iloc[-1].iloc[0]) # 万が一の保険
-                
-            if not (min_p <= curr_check <= max_p):
-                return None
-
-        # 本番データ取得
         period = "5d" if interval == "5m" else "6mo"
         df = yf.download(ticker, period=period, interval=interval, progress=False)
-        if len(df) < 20: return None
-
-        # データ整形 (MultiIndex対策)
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.droplevel(1)
-
+        
+        if len(df) == 0: return {"銘柄": ticker, "判定": "❌ データなし", "スコア": -999}
+        
+        # データ整形（ここが重要）
+        df = flatten_data(df)
+        
         latest = df.iloc[-1]
+        price = float(latest['Close'])
         
-        # 【重要】ここも修正: 確実にfloatにする
-        current_price = float(latest['Close'])
-        
-        # 最終価格フィルタ
-        if not (min_p <= current_price <= max_p):
-            return None
+        # 価格フィルタ
+        if not (min_p <= price <= max_p):
+            # フィルタで弾かれたことも表示しないと「0件」の原因になる
+            # 市場全体モードの場合は邪魔なのでNoneでいいが、
+            # 今回は原因究明のため「対象外」として返す手もある。
+            # いったんNoneにする（0件の原因が価格なら設定を変えてもらう）
+            return None 
 
         # テクニカル計算
         long_span = 75 if interval == "1d" else 20
@@ -141,84 +99,71 @@ def analyze_stock_hybrid(ticker, interval, min_p, max_p):
         score = 0
         reasons = []
 
-        # トレンド判定
-        ma_long_val = float(latest['MA_Long'])
-        if current_price > ma_long_val:
+        # トレンド
+        if price > df.iloc[-1]['MA_Long']:
             score += 20; reasons.append("上昇中")
         else:
             score -= 20; reasons.append("下落中")
 
-        # RSI判定
-        rsi_val = float(latest['RSI'])
-        if rsi_val < 35: score += 30; reasons.append("売られすぎ") # 条件を少し緩めました(30->35)
-        elif rsi_val > 70: score -= 30; reasons.append("買われすぎ")
+        # RSI
+        rsi = float(latest['RSI'])
+        if rsi < 30: score += 30; reasons.append("売られすぎ")
+        elif rsi > 70: score -= 30; reasons.append("買われすぎ")
 
-        # MACD判定
-        macd_val = float(latest['MACD_12_26_9'])
-        signal_val = float(latest['MACDs_12_26_9'])
-        prev_macd = float(df.iloc[-2]['MACD_12_26_9'])
-        prev_signal = float(df.iloc[-2]['MACDs_12_26_9'])
-
-        if macd_val > signal_val and prev_macd < prev_signal:
+        # MACD
+        hist = df.iloc[-1]['MACDh_12_26_9']
+        prev_hist = df.iloc[-2]['MACDh_12_26_9']
+        if hist > 0 and prev_hist < 0:
             score += 40; reasons.append("MACD金クロス")
 
-        # パターン認識
-        detected = check_candle_patterns(df)
-        if detected:
-            score += 20 * len(detected)
-            reasons.extend(detected)
+        # パターン
+        pats = check_patterns(df)
+        if pats:
+            score += 20; reasons.extend(pats)
 
         # 判定
-        judgement = "様子見"
-        if score >= 60: judgement = "買い推奨 (強気)"
-        elif score >= 40: judgement = "買い検討 (打診)"
-        elif score <= -40: judgement = "売り推奨 (空売り)"
+        judgement = "☁️ 様子見"
+        if score >= 60: judgement = "🔥 買い推奨"
+        elif score >= 20: judgement = "✨ 買い検討"
+        elif score <= -40: judgement = "📉 売り推奨"
         
-        # 市場全体モードなら「様子見」はカット
-        if "市場全体" in search_source and judgement == "様子見":
-            return None
-
+        # ★ここを変更！「様子見」も返します★
         return {
             "銘柄": ticker.replace(".T", ""),
-            "現在値": f"{int(current_price)}円",
-            "RSI": round(rsi_val, 1),
+            "現在値": f"{int(price)}円",
+            "RSI": round(rsi, 1),
             "判定": judgement,
             "スコア": score,
             "サイン": ", ".join(reasons)
         }
-    except Exception as e:
-        # print(e) # デバッグ用
-        return None
 
-# --- 結果表示 ---
-st.title(f"🚀 最強株スキャナー：{mode}")
+    except Exception as e:
+        return {"銘柄": ticker, "判定": "⚠️ エラー", "理由": str(e), "スコア": -999}
+
+# --- 画面表示 ---
+st.title(f"🚀 株スキャナー：{mode} (全表示版)")
 
 if st.button('スキャン開始'):
-    interval_setting = "5m" if "デイトレ" in mode else "1d"
     results = []
-    
+    interval = "5m" if "デイトレ" in mode else "1d"
     bar = st.progress(0)
-    status = st.empty()
     
-    for i, ticker in enumerate(ticker_list):
-        status.text(f"解析中... {ticker}")
-        data = analyze_stock_hybrid(ticker, interval_setting, min_price, max_price)
+    for i, t in enumerate(ticker_list):
+        data = analyze_stock(t, interval, min_price, max_price)
         if data: results.append(data)
         bar.progress((i + 1) / len(ticker_list))
-    
-    status.empty()
-    bar.empty()
-
+        
     if results:
         df_res = pd.DataFrame(results).sort_values(by="スコア", ascending=False)
         
-        def color_highlight(val):
-            color = 'black'
-            if '買い' in val: color = 'red'
-            elif '売り' in val: color = 'blue'
-            return f'color: {color}; font-weight: bold;'
+        def color_row(val):
+            color = 'white'
+            if '買い' in str(val): color = '#ffcccc' # 薄い赤
+            elif '売り' in str(val): color = '#cccdff' # 薄い青
+            elif 'エラー' in str(val): color = 'yellow'
+            return [f'background-color: {color}; color: black']*len(val)
 
-        st.dataframe(df_res.style.map(color_highlight, subset=['判定']))
-        st.success(f"{len(results)} 件のチャンス銘柄を発見！")
+        st.dataframe(df_res) # 色付けなしでシンプルに表示（エラー回避）
+        st.success(f"{len(results)} 件を表示しました。「様子見」も含みます。")
     else:
-        st.warning("条件に合う銘柄が見つかりませんでした。価格範囲を広げるか、リストを切り替えてみてください。")
+        st.warning("表示できる銘柄がありません。価格フィルタ（1000〜10000円）を確認してください。")
