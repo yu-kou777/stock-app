@@ -2,10 +2,9 @@ import yfinance as yf
 import pandas as pd
 import pandas_ta as ta
 import streamlit as st
-import numpy as np
 
 # --- アプリ設定 ---
-st.set_page_config(layout="wide", page_title="Stock Scanner Ultimate Pro")
+st.set_page_config(layout="wide", page_title="Stock Scanner DayTrade Pro")
 
 # --- 銘柄データベース & 和名辞書 ---
 TICKER_MAP = {
@@ -49,7 +48,7 @@ MARKET_TICKERS = list(TICKER_MAP.keys())
 st.sidebar.title("🎛️ トモユキ専用・操作盤")
 st.sidebar.header("👀 表示フィルター")
 show_all = st.sidebar.checkbox("☁️ 「様子見」も含めて全表示", value=False)
-mode = st.sidebar.radio("戦術モード", ("デイトレ (5分足・平均足予測)", "スイング (日足・反発狙い)"))
+mode = st.sidebar.radio("戦術モード", ("デイトレ (5分足・即エントリー)", "スイング (日足・反発狙い)"))
 search_source = st.sidebar.selectbox("検索対象", ("📝 自由入力", "📊 市場全体 (主要株)"))
 st.sidebar.subheader("💰 株価フィルタ")
 col1, col2 = st.sidebar.columns(2)
@@ -75,7 +74,7 @@ def flatten_data(df):
         except: pass
     return df
 
-# --- 平均足計算 ---
+# --- 平均足 ---
 def calculate_heikin_ashi(df):
     ha_df = df.copy()
     ha_df['HA_Close'] = (df['Open'] + df['High'] + df['Low'] + df['Close']) / 4
@@ -89,51 +88,61 @@ def calculate_heikin_ashi(df):
     ha_df['HA_Low'] = ha_df[['Low', 'HA_Open', 'HA_Close']].min(axis=1)
     return ha_df
 
-# --- 反発ライン計算 (プロロジック) ---
-def calculate_rebound_entry(df, trend_type, current_price, judgement):
+# --- 利確ターゲット計算 (即エントリー特化) ---
+def calculate_targets(price, judgement, mode_name):
     """
-    トレンド(フラッグ)ならMA25、ボックス(スクウェア)なら直近安値を計算
+    デイトレ: 即エントリー前提。ボラティリティを考慮し、現実的な「+2%」を目標にする。
+    スイング: 大きな値幅「+7%」を狙う。
     """
     try:
+        price = float(price)
+        entry_msg = f"{int(price)}" # 即エントリーなので現在値
+
+        if "デイトレ" in mode_name:
+            # デイトレは欲張りすぎず、確実に取れるラインを計算
+            profit_ratio = 1.02 # +2%
+            stop_ratio = 0.99   # -1% (損小利大)
+        else:
+            profit_ratio = 1.07 # +7%
+            stop_ratio = 0.97   # -3%
+
+        if "買い" in judgement:
+            target = price * profit_ratio
+            stop = price * stop_ratio
+            gain = int(target - price)
+            return entry_msg, f"🎯 {int(target)} (浮+{gain})", f"🛡️ {int(stop)}"
+        
+        elif "売り" in judgement:
+            target = price * (2 - profit_ratio)
+            stop = price * (2 - stop_ratio)
+            gain = int(price - target)
+            return entry_msg, f"🎯 {int(target)} (浮+{gain})", f"🛡️ {int(stop)}"
+        
+        else: return "-", "-", "-"
+
+    except: return "-", "-", "-"
+
+# --- 反発ライン計算 (スイング用) ---
+def calculate_rebound_entry(df, trend_type, current_price, judgement):
+    try:
         latest = df.iloc[-1]
-        
-        # 1. トレンドライン(移動平均)
-        ma25 = float(latest['MA_Long']) # 日足なら75日だが、押し目用には25日相当を使う
-        
-        # 2. ボックスサポート(過去20日間の安値)
+        ma25 = float(latest['MA_Long'])
         recent_low = float(df['Low'].tail(20).min())
         recent_high = float(df['High'].tail(20).max())
 
         entry_price = 0
-        
         if "買い" in judgement:
-            if trend_type == "上昇トレンド":
-                # トレンドなら移動平均線までの押し目を待つ
-                entry_price = ma25
-            else:
-                # ボックスなら下限で待つ
-                entry_price = recent_low
-                
-            # もし現在値がすでにエントリー価格より安いなら「即エントリー」
-            if current_price <= entry_price * 1.01:
-                return "⚡ 今すぐ突入"
-            else:
-                return f"⏳ {int(entry_price)}円まで待機"
-
+            if trend_type == "上昇トレンド": entry_price = ma25
+            else: entry_price = recent_low
+            if current_price <= entry_price * 1.01: return "⚡ 今すぐ突入"
+            else: return f"⏳ {int(entry_price)}円まで待機"
         elif "売り" in judgement:
-            if trend_type == "下落トレンド":
-                entry_price = ma25
-            else:
-                entry_price = recent_high
-                
-            if current_price >= entry_price * 0.99:
-                return "⚡ 今すぐ突入"
-            else:
-                return f"⏳ {int(entry_price)}円まで待機"
-        
+            if trend_type == "下落トレンド": entry_price = ma25
+            else: entry_price = recent_high
+            if current_price >= entry_price * 0.99: return "⚡ 今すぐ突入"
+            else: return f"⏳ {int(entry_price)}円まで待機"
         return "-"
-    except:
-        return "-"
+    except: return "-"
 
 # --- 解析エンジン ---
 def analyze_stock(ticker, interval, min_p, max_p):
@@ -144,14 +153,10 @@ def analyze_stock(ticker, interval, min_p, max_p):
         df = flatten_data(df)
         df = calculate_heikin_ashi(df)
 
-        # テクニカル指標
         long_span = 75 if interval == "1d" else 20
-        df['MA_Long'] = ta.sma(df['Close'], length=long_span) # トレンド判定用
-        # 押し目計算用に短期線(25)も計算
-        if interval == "1d":
-            df['MA_Short_25'] = ta.sma(df['Close'], length=25)
-        else:
-            df['MA_Short_25'] = ta.sma(df['Close'], length=5)
+        df['MA_Long'] = ta.sma(df['Close'], length=long_span)
+        if interval == "1d": df['MA_Short_25'] = ta.sma(df['Close'], length=25)
+        else: df['MA_Short_25'] = ta.sma(df['Close'], length=5)
 
         df['RSI'] = ta.rsi(df['Close'], length=14)
         macd = ta.macd(df['Close'])
@@ -159,22 +164,16 @@ def analyze_stock(ticker, interval, min_p, max_p):
 
         latest = df.iloc[-1]
         price = float(latest['Close'])
-        
         if not (min_p <= price <= max_p): return None 
 
         score = 0
         reasons = []
 
-        # --- トレンド判定 (フラッグかボックスか) ---
-        trend_status = "ボックス相場"
+        # 平均足・テクニカル判定
         ma_long_val = float(latest['MA_Long'])
+        trend_status = "ボックス"
+        if ma_long_val > float(df.iloc[-5]['MA_Long']): trend_status = "上昇トレンド"
         
-        # 傾きを見る（簡易版）
-        prev_ma = float(df.iloc[-5]['MA_Long'])
-        if ma_long_val > prev_ma * 1.01: trend_status = "上昇トレンド"
-        elif ma_long_val < prev_ma * 0.99: trend_status = "下落トレンド"
-
-        # --- 平均足判定 ---
         ha_close = float(latest['HA_Close']); ha_open = float(latest['HA_Open'])
         ha_low = float(latest['HA_Low']); ha_high = float(latest['HA_High'])
         body_len = abs(ha_close - ha_open)
@@ -186,31 +185,27 @@ def analyze_stock(ticker, interval, min_p, max_p):
             if (ha_high - ha_open) < (body_len * 0.1): score -= 30; reasons.append("平均足:最弱")
             else: score -= 10; reasons.append("平均足:陰")
 
-        # --- テクニカル判定 ---
         if price > ma_long_val: score += 10
         else: score -= 10
-        rsi_val = float(latest['RSI'])
-        if rsi_val < 30: score += 20; reasons.append("RSI底")
-        elif rsi_val > 70: score -= 20; reasons.append("RSI天")
-        hist = float(latest['MACDh_12_26_9'])
-        if hist > 0 and float(df.iloc[-2]['MACDh_12_26_9']) < 0: score += 30; reasons.append("MACD好")
+        if float(latest['RSI']) < 30: score += 20; reasons.append("RSI底")
+        elif float(latest['RSI']) > 70: score -= 20; reasons.append("RSI天")
+        if float(latest['MACDh_12_26_9']) > 0 and float(df.iloc[-2]['MACDh_12_26_9']) < 0: score += 30; reasons.append("MACD好")
 
-        # 総合判定
         judgement = "☁️ 様子見"
         if score >= 50: judgement = "🔥 買い推奨"
         elif score >= 20: judgement = "✨ 買い検討"
         elif score <= -40: judgement = "📉 売り推奨"
         elif score <= -20: judgement = "☔ 売り検討"
         
-        # 社名取得
         company_name = TICKER_MAP.get(ticker, "-")
+        
+        # ★利確ターゲット計算 (即エントリー版)★
+        entry_target, profit_target, stop_loss = calculate_targets(price, judgement, mode)
 
-        # ★ここが新機能: 反発ラインの計算★
+        # スイング用の待機計算
         wait_target = "-"
-        if interval == "1d": # スイングのみ有効
-            # 押し目計算用のDFを作る（MA25を使うため）
-            df_calc = df.copy()
-            df_calc['MA_Long'] = df['MA_Short_25'] # 上書きして計算関数に渡す
+        if interval == "1d":
+            df_calc = df.copy(); df_calc['MA_Long'] = df['MA_Short_25']
             wait_target = calculate_rebound_entry(df_calc, trend_status, price, judgement)
 
         return {
@@ -218,8 +213,9 @@ def analyze_stock(ticker, interval, min_p, max_p):
             "社名": company_name,
             "現在値": f"{int(price)}",
             "判定": judgement,
-            "待機→突入": wait_target, # 新しい列！
-            "相場": trend_status,
+            "利確ゴール": profit_target, # 変更点
+            "損切ライン": stop_loss,     # 変更点
+            "待機(Swing)": wait_target,
             "スコア": score,
             "根拠": ", ".join(reasons)
         }
@@ -228,6 +224,7 @@ def analyze_stock(ticker, interval, min_p, max_p):
 
 # --- 画面表示 ---
 st.title(f"🚀 株スキャナー：{mode}")
+
 if st.button('スキャン開始'):
     results = []
     interval = "5m" if "デイトレ" in mode else "1d"
@@ -245,12 +242,16 @@ if st.button('スキャン開始'):
             df_res["絶対値スコア"] = df_res["スコア"].abs()
             df_res = df_res.sort_values(by="絶対値スコア", ascending=False)
             
-            # 列の並び順 (「待機→突入」を目立つ位置に)
-            cols = ["銘柄", "社名", "現在値", "判定", "待機→突入", "相場", "根拠", "スコア"]
-            st.dataframe(df_res[cols])
+            # 列の整理
+            cols = ["銘柄", "社名", "現在値", "判定", "利確ゴール", "損切ライン", "根拠", "スコア"]
+            if interval == "1d": # スイング時は待機列も表示
+                cols.insert(4, "待機(Swing)")
             
-            st.info("💡 「待機→突入」の見方： プロは現在値で飛びつかず、この価格まで落ちてくるのを待ちます。")
-            st.success(f"{len(df_res)} 件表示")
+            st.dataframe(df_res[cols])
+            if "デイトレ" in mode:
+                st.success(f"🚀 デイトレモード：現在値から【+2%】の利確ゴールを表示中。注文準備を！")
+            else:
+                st.success(f"📈 スイングモード：トレンドに沿った押し目狙い＆【+7%】の利確ゴールを表示中。")
         else:
             st.warning("現在、強いサインが出ている銘柄はありません。")
     else:
