@@ -26,7 +26,7 @@ MARKET_TICKERS = list(TICKER_MAP.keys())
 
 # --- サイドバー ---
 st.sidebar.title("🎛️ テクニカル特化・操作盤")
-mode = st.sidebar.radio("戦術モード", ("デイトレ (5m + 日足平均足監視)", "スイング (日足・60日線＆酒田五法)"))
+mode = st.sidebar.radio("戦術モード", ("デイトレ (5m + 日足平均足監視)", "スイング (日足・空売り対応＆酒田五法)"))
 search_source = st.sidebar.selectbox("検索対象", ("📊 市場全体 (主要株)", "📝 自由入力"))
 show_all = st.sidebar.checkbox("☁️ 「様子見」も含めて全表示", value=False)
 
@@ -102,20 +102,14 @@ def analyze_stock(ticker, interval, min_p, max_p, mode_name):
         
         if len(df_daily) >= 60:
             df_daily = flatten_data(df_daily)
-            # 日足の平均足を計算
             df_daily = calculate_heikin_ashi(df_daily)
             
             d_latest = df_daily.iloc[-1]
-            d_prev = df_daily.iloc[-2]
-            
             d_ma20 = df_daily['Close'].rolling(20).mean().iloc[-1]
             d_ma60 = df_daily['Close'].rolling(60).mean().iloc[-1]
             
-            # ① 日足 平均足判定 (最強のトレンド確認)
-            ha_close = d_latest['HA_Close']
-            ha_open = d_latest['HA_Open']
-            ha_high = d_latest['HA_High']
-            ha_low = d_latest['HA_Low']
+            ha_close = d_latest['HA_Close']; ha_open = d_latest['HA_Open']
+            ha_high = d_latest['HA_High']; ha_low = d_latest['HA_Low']
             
             if ha_close < ha_open: # 平均足が陰線
                 is_macro_weak = True
@@ -126,14 +120,12 @@ def analyze_stock(ticker, interval, min_p, max_p, mode_name):
                     is_crashing_today = True
                     macro_trend_msg = "🚨大局:強烈な下落(平均足坊主)"
 
-            # ② 従来の下落トレンド判定 (MAベース)
             elif d_latest['Close'] < d_ma20 and d_ma20 < d_ma60:
                 is_macro_weak = True
                 macro_trend_msg = "⚠️大局:完全下落(MA下)"
             elif ha_close > ha_open and d_latest['Close'] > d_ma20:
                 macro_trend_msg = "📈大局:上昇(平均足・陽線)"
 
-        # ユーザー指定の足（5分 or 日足）を取得
         period = "5d" if interval == "5m" else "1y" 
         df = tkr.history(period=period, interval=interval)
         if len(df) < 65 and interval == "1d": return None
@@ -156,8 +148,7 @@ def analyze_stock(ticker, interval, min_p, max_p, mode_name):
         df = pd.concat([df, macd], axis=1)
         df['ATR'] = ta.atr(df['High'], df['Low'], df['Close'], length=14)
 
-        latest = df.iloc[-1]
-        prev = df.iloc[-2]
+        latest = df.iloc[-1]; prev = df.iloc[-2]
         price = float(latest['Close'])
         if not (min_p <= price <= max_p): return None 
 
@@ -169,7 +160,7 @@ def analyze_stock(ticker, interval, min_p, max_p, mode_name):
         }
 
         # ==========================================
-        # 🚀 デイトレモード (5分足 + VWAP + 日足平均足監視)
+        # 🚀 デイトレモード (5分足)
         # ==========================================
         if "デイトレ" in mode_name:
             recent_12_high = df['High'].tail(12).max()
@@ -182,29 +173,18 @@ def analyze_stock(ticker, interval, min_p, max_p, mode_name):
             macd_val = float(latest['MACDh_12_26_9'])
             macd_prev = float(prev['MACDh_12_26_9'])
             rsi_val = float(latest['RSI'])
-            
             vwap_val = float(latest['VWAP'])
             is_below_vwap = price < vwap_val
 
-            # MACD好転（上抜け）
             if is_yokoyoko and macd_prev < 0 and macd_val > 0:
-                if is_crashing_today:
-                    score -= 40; reasons.append("🚫買厳禁(日足平均足が強烈な陰線)")
-                    judgement = "🚫 見送り(ナイフ)"
-                elif is_macro_weak:
-                    score -= 20; reasons.append("🚫買厳禁(日足平均足が陰線)")
-                    judgement = "🚫 見送り(ダマシ)"
-                elif is_below_vwap:
-                    score -= 20; reasons.append("🚫買厳禁(VWAP未満/板重)")
-                    judgement = "🚫 見送り(板重)"
+                if is_crashing_today or is_macro_weak or is_below_vwap:
+                    score -= 40; reasons.append("🚫買厳禁(大局弱気)"); judgement = "🚫 見送り(ダマシ)"
                 else:
                     score += 50; reasons.append("🔥ヨコヨコ上抜け初動"); judgement = "🔥 買い(初動)"
             
-            # MACD悪化（下抜け）
             elif is_yokoyoko and macd_prev > 0 and macd_val < 0:
                 if is_crashing_today or is_macro_weak or is_below_vwap: 
-                    score -= 60; reasons.append("⚠️日足弱気+5分下抜け(順張り売)")
-                    judgement = "📉 絶好の売り場"
+                    score -= 60; reasons.append("⚠️日足弱気+5分下抜け"); judgement = "📉 絶好の売り場"
                 else:
                     score -= 50; reasons.append("⚠️ヨコヨコ下抜け"); judgement = "📉 売り(初動)"
 
@@ -224,7 +204,7 @@ def analyze_stock(ticker, interval, min_p, max_p, mode_name):
             res_dict["MACDヒスト"] = f"{macd_val:.2f}"
 
         # ==========================================
-        # 📉 スイングモード (日足)
+        # 📉 スイングモード (日足) - 空売り特化改修
         # ==========================================
         else:
             ma60_val = float(latest['MA_60'])
@@ -234,7 +214,7 @@ def analyze_stock(ticker, interval, min_p, max_p, mode_name):
             if 0 <= dist_ma60 <= 2.5 and ma60_val >= ma60_prev: 
                 score += 40; reasons.append("🎯60日線サポート接近")
             
-            if is_crashing_today: score -= 80; reasons.append("🚨日足平均足が陰線坊主(ナイフ警戒)")
+            if is_crashing_today: score -= 80; reasons.append("🚨日足平均足が陰線坊主")
             elif is_macro_weak: score -= 50; reasons.append("⚠️大局弱気(平均足陰線)")
 
             sakata_signal, sakata_score = check_sakata_gohou(df)
@@ -246,12 +226,19 @@ def analyze_stock(ticker, interval, min_p, max_p, mode_name):
             elif prev['MA_Short'] >= prev['MA_Long'] and latest['MA_Short'] < latest['MA_Long']:
                 score -= 30; reasons.append("💀Dクロス(5/25)")
 
-            if (is_macro_weak or is_crashing_today) and "特級買" not in sakata_signal:
-                judgement = "🚫 買厳禁(ダマシ警戒)"
-            elif score >= 40: judgement = "🔥 買・強気"
-            elif score >= 20: judgement = "✨ 買・打診"
-            elif score <= -40: judgement = "📉 売・逃げ推奨"
-            elif score <= -20: judgement = "☔ 売・警戒"
+            # ★ 売り推奨への上書きロジック（攻めの姿勢） ★
+            if is_crashing_today and "特級買" not in sakata_signal:
+                judgement = "📉 空売り推奨(暴落追撃)"
+            elif is_macro_weak and "特級買" not in sakata_signal:
+                if score <= -40:
+                    judgement = "📉 スイング売り(順張り)"
+                else:
+                    judgement = "🚫 買厳禁(ダマシ警戒)"
+            else:
+                if score >= 40: judgement = "🔥 買・強気"
+                elif score >= 20: judgement = "✨ 買・打診"
+                elif score <= -40: judgement = "📉 売・逃げ推奨"
+                elif score <= -20: judgement = "☔ 売・警戒"
 
             res_dict["マクロ(日足)"] = macro_trend_msg
             res_dict["トレンド(60MA)"] = "📉 弱気" if is_macro_weak else f"乖離 {dist_ma60:.1f}%"
@@ -292,7 +279,7 @@ if st.button('スキャン開始'):
                 
             st.dataframe(df_res[cols], use_container_width=True)
             
-            st.success("🎯 日足の『平均足（Heikin-Ashi）』をマクロトレンドの最優先フィルターとして採用しました。MAが上向きでも平均足が陰線なら買いをブロックします。")
+            st.success("🎯 スイングモードにて、平均足の強い陰線（陰線坊主）を検知した場合、単なる見送りではなく『空売り推奨』としてシグナルを出すように進化させました。")
         else:
             st.warning("現在、強いサインが出ている銘柄はありません。")
     else:
