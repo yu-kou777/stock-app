@@ -26,7 +26,7 @@ MARKET_TICKERS = list(TICKER_MAP.keys())
 
 # --- サイドバー ---
 st.sidebar.title("🎛️ テクニカル特化・操作盤")
-mode = st.sidebar.radio("戦術モード", ("デイトレ (5分足・遅延対策済み)", "スイング (日足・60日線＆酒田五法)"))
+mode = st.sidebar.radio("戦術モード", ("デイトレ (5m + 日足トレンド監視)", "スイング (日足・60日線＆酒田五法)"))
 search_source = st.sidebar.selectbox("検索対象", ("📊 市場全体 (主要株)", "📝 自由入力"))
 show_all = st.sidebar.checkbox("☁️ 「様子見」も含めて全表示", value=False)
 
@@ -37,7 +37,7 @@ max_price = col2.number_input("上限", value=50000, step=100)
 
 ticker_list = MARKET_TICKERS
 if "自由入力" in search_source:
-    input_tickers = st.sidebar.text_area("銘柄コード (カンマ区切り)", "6857, 9107, 7011")
+    input_tickers = st.sidebar.text_area("銘柄コード (カンマ区切り)", "6857, 6902, 5406")
     ticker_list = [f"{t.strip()}.T" if t.strip().isdigit() else t.strip() for t in input_tickers.split(',') if t.strip()]
 
 # --- データ整形 ---
@@ -71,9 +71,8 @@ def check_sakata_gohou(df):
     upper_shadow0 = h0 - max(c0, o0)
     lower_shadow0 = min(c0, o0) - l0
     if upper_shadow0 > body0 * 2.0 and lower_shadow0 < body0 * 0.5:
-        if df.iloc[-1]['Close'] > df.iloc[-1]['MA_60']: 
-            signals.append("🌠流れ星(急落警戒)")
-            score_change -= 50
+        signals.append("🌠流れ星(急落警戒)")
+        score_change -= 50
 
     if is_down2 and body2 > (h2-l2)*0.6 and body1 < (h1-l1)*0.3 and is_up0 and c0 > (o2+c2)/2:
         signals.append("🌅明けの明星(特級買)")
@@ -85,23 +84,41 @@ def check_sakata_gohou(df):
 # --- 解析エンジン ---
 def analyze_stock(ticker, interval, min_p, max_p, mode_name):
     try:
-        # スイング時は正確な60日線を引くため1年分取得
-        period = "5d" if interval == "5m" else "1y" 
         tkr = yf.Ticker(ticker)
+        
+        # ★ マルチタイムフレーム分析 (MTFA) ★
+        # デイトレモードでも必ず日足(マクロ)のトレンドを確認し、ダマシを防ぐ
+        df_daily = tkr.history(period="3mo", interval="1d")
+        is_macro_downtrend = False
+        macro_trend_msg = "ニュートラル"
+        
+        if len(df_daily) >= 60:
+            df_daily = flatten_data(df_daily)
+            d_close = df_daily['Close'].iloc[-1]
+            d_ma20 = df_daily['Close'].rolling(20).mean().iloc[-1]
+            d_ma60 = df_daily['Close'].rolling(60).mean().iloc[-1]
+            
+            # 日足が完全な下落トレンド（デンソーや神戸製鋼の状態）
+            if d_close < d_ma20 and d_ma20 < d_ma60:
+                is_macro_downtrend = True
+                macro_trend_msg = "⚠️大局:完全下落"
+            elif d_close > d_ma20 and d_ma20 > d_ma60:
+                macro_trend_msg = "📈大局:上昇トレンド"
+
+        # ユーザー指定の足（5分 or 日足）を取得
+        period = "5d" if interval == "5m" else "1y" 
         df = tkr.history(period=period, interval=interval)
-        if len(df) < 65: return None
+        if len(df) < 65 and interval == "1d": return None
+        if len(df) < 20 and interval == "5m": return None
         
         df = flatten_data(df)
-        
-        # テクニカル指標の計算
         df['MA_Short'] = ta.sma(df['Close'], length=5)
         df['MA_Long'] = ta.sma(df['Close'], length=25 if interval=="1d" else 20)
         
-        # ★ 60日移動平均線の追加 ★
         if interval == "1d":
             df['MA_60'] = ta.sma(df['Close'], length=60)
         else:
-            df['MA_60'] = df['MA_Long'] # デイトレ時はダミー
+            df['MA_60'] = df['MA_Long']
             
         df['RSI'] = ta.rsi(df['Close'], length=14)
         macd = ta.macd(df['Close'])
@@ -126,51 +143,43 @@ def analyze_stock(ticker, interval, min_p, max_p, mode_name):
         }
 
         # ==========================================
-        # 📉 スイングモード (日足: 60日線 ＆ 酒田五法)
+        # 📉 スイングモード (日足)
         # ==========================================
         if "スイング" in mode_name:
             ma60_val = float(latest['MA_60'])
-            ma60_prev = float(df.iloc[-5]['MA_60']) # 5日前の60日線（傾き確認用）
-            
-            # 60日線との距離（%）
+            ma60_prev = float(df.iloc[-5]['MA_60'])
             dist_ma60 = (price - ma60_val) / ma60_val * 100
 
-            # ★ 1. 60日線サポート反発狙い (最強の買い根拠)
-            if 0 <= dist_ma60 <= 2.5: # 60日線の少し上〜ピッタリ
-                if ma60_val >= ma60_prev: # 60日線が横ばい〜上向き
-                    score += 40
-                    reasons.append("🎯60日線サポート接近")
+            if 0 <= dist_ma60 <= 2.5: 
+                if ma60_val >= ma60_prev: 
+                    score += 40; reasons.append("🎯60日線サポート接近")
             
-            # ★ 2. 下落トレンドのストッパー (ダマシ回避)
-            is_downtrend = price < ma60_val and ma60_val < ma60_prev
-            if is_downtrend:
-                score -= 50
-                reasons.append("⚠️完全下落トレンド(MA60下)")
+            # 日足ストッパー
+            if is_macro_downtrend:
+                score -= 50; reasons.append("⚠️完全下落トレンド(MA60下)")
 
-            # 酒田五法判定
             sakata_signal, sakata_score = check_sakata_gohou(df)
             score += sakata_score
             if sakata_signal != "なし": reasons.append(sakata_signal)
 
-            # ゴールデン/デッドクロス判定
             if prev['MA_Short'] <= prev['MA_Long'] and latest['MA_Short'] > latest['MA_Long']:
                 score += 30; reasons.append("✨Gクロス(5/25)")
             elif prev['MA_Short'] >= prev['MA_Long'] and latest['MA_Short'] < latest['MA_Long']:
                 score -= 30; reasons.append("💀Dクロス(5/25)")
 
-            # 下落トレンド中の厳格な判定上書き
-            if is_downtrend and "特級買" not in sakata_signal:
+            if is_macro_downtrend and "特級買" not in sakata_signal:
                 judgement = "🚫 買厳禁(ダマシ警戒)"
             elif score >= 40: judgement = "🔥 買・強気"
             elif score >= 20: judgement = "✨ 買・打診"
             elif score <= -40: judgement = "📉 売・逃げ推奨"
             elif score <= -20: judgement = "☔ 売・警戒"
 
-            res_dict["トレンド(60MA)"] = "📉 下落(MA60下)" if is_downtrend else f"乖離 {dist_ma60:.1f}%"
+            res_dict["マクロ(日足)"] = macro_trend_msg
+            res_dict["トレンド(60MA)"] = "📉 下落(MA60下)" if is_macro_downtrend else f"乖離 {dist_ma60:.1f}%"
             res_dict["酒田五法"] = sakata_signal
 
         # ==========================================
-        # 🚀 デイトレモード (5分足: ヨコヨコ脱出)
+        # 🚀 デイトレモード (5分足 + マクロ監視)
         # ==========================================
         else:
             recent_12_high = df['High'].tail(12).max()
@@ -184,22 +193,40 @@ def analyze_stock(ticker, interval, min_p, max_p, mode_name):
             macd_prev = float(prev['MACDh_12_26_9'])
             rsi_val = float(latest['RSI'])
 
+            # MACD好転（上抜け）
             if is_yokoyoko and macd_prev < 0 and macd_val > 0:
-                score += 50; reasons.append("🔥ヨコヨコ上抜け初動")
-                judgement = "🔥 買い(初動)"
+                if is_macro_downtrend: # ★MTFAストッパー発動★
+                    score -= 20
+                    reasons.append("🚫買厳禁(大局下落中の自律反発)")
+                    judgement = "🚫 見送り(ダマシ反発)"
+                else:
+                    score += 50
+                    reasons.append("🔥ヨコヨコ上抜け初動")
+                    judgement = "🔥 買い(初動)"
+            
+            # MACD悪化（下抜け）
             elif is_yokoyoko and macd_prev > 0 and macd_val < 0:
-                score -= 50; reasons.append("⚠️ヨコヨコ下抜け")
-                judgement = "📉 売り(初動)"
+                if is_macro_downtrend: # 大局下落時の5分足下抜けは「絶好の売り場」
+                    score -= 60
+                    reasons.append("⚠️大局下落+5分足下抜け(順張り売)")
+                    judgement = "📉 絶好の売り場"
+                else:
+                    score -= 50
+                    reasons.append("⚠️ヨコヨコ下抜け")
+                    judgement = "📉 売り(初動)"
 
             if rsi_val < 25: score += 20; reasons.append("RSI売られすぎ")
             elif rsi_val > 75: score -= 30; reasons.append("RSI買われすぎ")
 
             if "様子見" in judgement:
+                if is_macro_downtrend and score > 0: score = 0 # 弱い買いサインを打ち消し
+                
                 if score >= 40: judgement = "🔥 買・強気"
                 elif score >= 20: judgement = "✨ 買・打診"
                 elif score <= -40: judgement = "📉 売・逃げ推奨"
                 elif score <= -20: judgement = "☔ 売・警戒"
 
+            res_dict["マクロ(日足)"] = macro_trend_msg
             res_dict["状態(5m)"] = state
             res_dict["RSI"] = f"{rsi_val:.1f}"
             res_dict["MACDヒスト"] = f"{macd_val:.2f}"
@@ -234,14 +261,14 @@ if st.button('スキャン開始'):
             df_res = df_res.sort_values(by="絶対値スコア", ascending=False).drop(columns=["絶対値スコア"])
             
             if "デイトレ" in mode:
-                cols = ["銘柄", "社名", "現在値", "判定", "状態(5m)", "RSI", "MACDヒスト", "ボラ(ATR)", "根拠", "スコア"]
+                cols = ["銘柄", "社名", "現在値", "判定", "マクロ(日足)", "状態(5m)", "RSI", "MACDヒスト", "ボラ(ATR)", "根拠", "スコア"]
             else:
-                cols = ["銘柄", "社名", "現在値", "判定", "トレンド(60MA)", "酒田五法", "ボラ(ATR)", "根拠", "スコア"]
+                cols = ["銘柄", "社名", "現在値", "判定", "マクロ(日足)", "トレンド(60MA)", "酒田五法", "ボラ(ATR)", "根拠", "スコア"]
                 
             st.dataframe(df_res[cols], use_container_width=True)
             
-            if "スイング" in mode:
-                st.success("🛡️ 60日移動平均線を基準に、強力なサポート反発狙いと、下落トレンド中の「買い厳禁」フィルターを稼働させています。")
+            if "デイトレ" in mode:
+                st.success("🎯 デイトレモード：日足の大きなトレンド（MTFA）を監視し、下落トレンド中の『ダマシの反発』をブロックしています。")
         else:
             st.warning("現在、強いサインが出ている銘柄はありません。")
     else:
