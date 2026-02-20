@@ -26,7 +26,7 @@ MARKET_TICKERS = list(TICKER_MAP.keys())
 
 # --- サイドバー ---
 st.sidebar.title("🎛️ テクニカル特化・操作盤")
-mode = st.sidebar.radio("戦術モード", ("デイトレ (5m + 日足平均足監視)", "スイング (日足・空売り対応＆酒田五法)"))
+mode = st.sidebar.radio("戦術モード", ("デイトレ (5m + スイング目線補足)", "スイング (日足・空売り対応＆酒田五法)"))
 search_source = st.sidebar.selectbox("検索対象", ("📊 市場全体 (主要株)", "📝 自由入力"))
 show_all = st.sidebar.checkbox("☁️ 「様子見」も含めて全表示", value=False)
 
@@ -37,7 +37,7 @@ max_price = col2.number_input("上限", value=50000, step=100)
 
 ticker_list = MARKET_TICKERS
 if "自由入力" in search_source:
-    input_tickers = st.sidebar.text_area("銘柄コード (カンマ区切り)", "6857, 6902, 5406")
+    input_tickers = st.sidebar.text_area("銘柄コード (カンマ区切り)", "6857, 6902, 4385")
     ticker_list = [f"{t.strip()}.T" if t.strip().isdigit() else t.strip() for t in input_tickers.split(',') if t.strip()]
 
 # --- データ整形 ---
@@ -111,11 +111,9 @@ def analyze_stock(ticker, interval, min_p, max_p, mode_name):
             ha_close = d_latest['HA_Close']; ha_open = d_latest['HA_Open']
             ha_high = d_latest['HA_High']; ha_low = d_latest['HA_Low']
             
-            if ha_close < ha_open: # 平均足が陰線
+            if ha_close < ha_open: 
                 is_macro_weak = True
                 macro_trend_msg = "⚠️大局:弱気(日足平均足が陰線)"
-                
-                # さらに上ヒゲがない（強い下落モメンタム）場合
                 if ha_high == ha_open or (ha_high - ha_open) < (ha_open - ha_close) * 0.1:
                     is_crashing_today = True
                     macro_trend_msg = "🚨大局:強烈な下落(平均足坊主)"
@@ -160,7 +158,7 @@ def analyze_stock(ticker, interval, min_p, max_p, mode_name):
         }
 
         # ==========================================
-        # 🚀 デイトレモード (5分足)
+        # 🚀 デイトレモード (5分足 + スイング補足)
         # ==========================================
         if "デイトレ" in mode_name:
             recent_12_high = df['High'].tail(12).max()
@@ -176,6 +174,16 @@ def analyze_stock(ticker, interval, min_p, max_p, mode_name):
             vwap_val = float(latest['VWAP'])
             is_below_vwap = price < vwap_val
 
+            # ★ スイング目線の補足ロジック追加 ★
+            swing_advice = "☁️ 様子見"
+            if is_crashing_today:
+                swing_advice = "📉 スイング: 空売り推奨(暴落)"
+            elif is_macro_weak:
+                swing_advice = "☔ スイング: 売り目線(大局弱気)"
+            elif "上昇" in macro_trend_msg:
+                swing_advice = "🔥 スイング: 買い目線(押し目待ち)"
+
+            # 5分足の判定ロジック
             if is_yokoyoko and macd_prev < 0 and macd_val > 0:
                 if is_crashing_today or is_macro_weak or is_below_vwap:
                     score -= 40; reasons.append("🚫買厳禁(大局弱気)"); judgement = "🚫 見送り(ダマシ)"
@@ -198,13 +206,16 @@ def analyze_stock(ticker, interval, min_p, max_p, mode_name):
                 elif score <= -40: judgement = "📉 売・逃げ推奨"
                 elif score <= -20: judgement = "☔ 売・警戒"
 
+            # 表示用辞書への格納
+            res_dict["判定(デイトレ)"] = judgement
+            res_dict["スイング補足"] = swing_advice  # 新規追加
             res_dict["マクロ(日足)"] = macro_trend_msg
             res_dict["VWAP判定"] = "🔻 重い(未満)" if is_below_vwap else "🔺 軽い(以上)"
             res_dict["状態(5m)"] = state
             res_dict["MACDヒスト"] = f"{macd_val:.2f}"
 
         # ==========================================
-        # 📉 スイングモード (日足) - 空売り特化改修
+        # 📉 スイングモード (日足) 
         # ==========================================
         else:
             ma60_val = float(latest['MA_60'])
@@ -226,25 +237,22 @@ def analyze_stock(ticker, interval, min_p, max_p, mode_name):
             elif prev['MA_Short'] >= prev['MA_Long'] and latest['MA_Short'] < latest['MA_Long']:
                 score -= 30; reasons.append("💀Dクロス(5/25)")
 
-            # ★ 売り推奨への上書きロジック（攻めの姿勢） ★
             if is_crashing_today and "特級買" not in sakata_signal:
                 judgement = "📉 空売り推奨(暴落追撃)"
             elif is_macro_weak and "特級買" not in sakata_signal:
-                if score <= -40:
-                    judgement = "📉 スイング売り(順張り)"
-                else:
-                    judgement = "🚫 買厳禁(ダマシ警戒)"
+                if score <= -40: judgement = "📉 スイング売り(順張り)"
+                else: judgement = "🚫 買厳禁(ダマシ警戒)"
             else:
                 if score >= 40: judgement = "🔥 買・強気"
                 elif score >= 20: judgement = "✨ 買・打診"
                 elif score <= -40: judgement = "📉 売・逃げ推奨"
                 elif score <= -20: judgement = "☔ 売・警戒"
 
+            res_dict["判定(スイング)"] = judgement
             res_dict["マクロ(日足)"] = macro_trend_msg
             res_dict["トレンド(60MA)"] = "📉 弱気" if is_macro_weak else f"乖離 {dist_ma60:.1f}%"
             res_dict["酒田五法"] = sakata_signal
 
-        res_dict["判定"] = judgement
         res_dict["根拠"] = ", ".join(reasons) if reasons else "-"
         res_dict["スコア"] = score
         return res_dict
@@ -266,20 +274,24 @@ if st.button('スキャン開始'):
         
     if results:
         df_res = pd.DataFrame(results)
-        if not show_all: df_res = df_res[~df_res["判定"].str.contains("様子見|見送り")]
+        if not show_all: 
+            # デイトレとスイングで判定の列名が異なるため対応
+            judge_col = "判定(デイトレ)" if "デイトレ" in mode else "判定(スイング)"
+            df_res = df_res[~df_res[judge_col].str.contains("様子見|見送り")]
 
         if not df_res.empty:
             df_res["絶対値スコア"] = df_res["スコア"].abs()
             df_res = df_res.sort_values(by="絶対値スコア", ascending=False).drop(columns=["絶対値スコア"])
             
             if "デイトレ" in mode:
-                cols = ["銘柄", "社名", "現在値", "判定", "マクロ(日足)", "VWAP判定", "状態(5m)", "MACDヒスト", "ボラ(ATR)", "根拠", "スコア"]
+                cols = ["銘柄", "社名", "現在値", "判定(デイトレ)", "スイング補足", "マクロ(日足)", "VWAP判定", "状態(5m)", "MACDヒスト", "ボラ(ATR)", "根拠", "スコア"]
             else:
-                cols = ["銘柄", "社名", "現在値", "判定", "マクロ(日足)", "トレンド(60MA)", "酒田五法", "ボラ(ATR)", "根拠", "スコア"]
+                cols = ["銘柄", "社名", "現在値", "判定(スイング)", "マクロ(日足)", "トレンド(60MA)", "酒田五法", "ボラ(ATR)", "根拠", "スコア"]
                 
             st.dataframe(df_res[cols], use_container_width=True)
             
-            st.success("🎯 スイングモードにて、平均足の強い陰線（陰線坊主）を検知した場合、単なる見送りではなく『空売り推奨』としてシグナルを出すように進化させました。")
+            if "デイトレ" in mode:
+                st.success("🎯 デイトレの判定が『見送り（高値掴み警戒）』であっても、大局のトレンドが良ければ『🔥スイング:買い目線』として補足アドバイスを表示するようになりました。")
         else:
             st.warning("現在、強いサインが出ている銘柄はありません。")
     else:
