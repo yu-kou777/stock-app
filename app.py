@@ -49,56 +49,87 @@ def add_to_list(ticker_code):
         return True
     return False
 
-# --- 3. 解析エンジン ---
+# --- 3. 高精度解析エンジン ---
 def analyze_stock(ticker, min_p, max_p, is_force=False):
     try:
         tkr = yf.Ticker(ticker)
         df_d = tkr.history(period="6mo", interval="1d")
-        df_w = tkr.history(period="2y", interval="1wk")
-        if df_d.empty or df_w.empty: return None
+        if df_d.empty or len(df_d) < 60: return None
 
         price = df_d.iloc[-1]['Close']
         if not is_force and not (min_p <= price <= max_p): return None
 
+        # テクニカル指標算出
+        df_d['MA20'] = df_d['Close'].rolling(20).mean()
         df_d['MA60'] = df_d['Close'].rolling(60).mean()
-        df_w['MA20'] = df_w['Close'].rolling(20).mean()
-        target_p = int(df_w['MA20'].iloc[-1])
-        rsi_w = ta.rsi(df_w['Close'], length=14).iloc[-1]
-        dev_w = (price - target_p) / target_p * 100
-
-        std20 = df_d['Close'].rolling(20).std().iloc[-1]
-        ma20 = df_d['Close'].rolling(20).mean().iloc[-1]
-        floor = int(ma20 - (std20 * 2))
-
-        is_w_up = df_w['Close'].iloc[-1] > df_w['Open'].iloc[-1]
-        is_d_up = df_d['Close'].iloc[-1] > df_d['Open'].iloc[-1]
         
-        score = (50 if is_w_up else -50) + (30 if is_d_up else -30)
-        is_oversold = rsi_w < 35 or dev_w < -15
-        if is_oversold: score += 40
+        # MACD
+        macd = ta.macd(df_d['Close'])
+        df_d = pd.concat([df_d, macd], axis=1)
+        
+        # RSI
+        df_d['RSI'] = ta.rsi(df_d['Close'], length=14)
+        
+        # 平均足
+        ha_df = ta.ha(df_d['Open'], df_d['High'], df_d['Low'], df_d['Close'])
+        df_d = pd.concat([df_d, ha_df], axis=1)
 
-        if score >= 60: judge = "🔥 特級買"
-        elif score >= 20: judge = "✨ 買目線"
-        elif score <= -60: judge = "📉 特級売"
-        elif score <= -20: judge = "☔ 売目線"
+        # --- パターン検知ロジック ---
+        patterns = []
+        pattern_score = 0
+        
+        # 1. ダブルボトム近傍 (過去60日安値との乖離1.5%以内)
+        low_60 = df_d['Low'].tail(60).min()
+        if price <= low_60 * 1.015:
+            patterns.append("🏺 Wボトム圏")
+            pattern_score += 30
+            
+        # 2. フラッグ/スクエア (直近10日の振幅が3%以内)
+        recent_range = (df_d['High'].tail(10).max() - df_d['Low'].tail(10).min()) / price
+        if recent_range < 0.03:
+            patterns.append("🏁 旗形/保合")
+            pattern_score += 20
+
+        # 3. 酒田五法 (赤三兵)
+        if all(df_d['Close'].tail(3) > df_d['Open'].tail(3)) and all(df_d['Close'].tail(3).diff().dropna() > 0):
+            patterns.append("🔥 赤三兵")
+            pattern_score += 40
+
+        # 精密指値 (コンフルエンス)
+        # ボリバン-2σと過去安値の平均をとる
+        std20 = df_d['Close'].rolling(20).std().iloc[-1]
+        bb_low = df_d['MA20'].iloc[-1] - (std20 * 2)
+        precision_floor = int((bb_low + low_60) / 2)
+
+        # 判定
+        score = pattern_score
+        if df_d['MACDh_12_26_9'].iloc[-1] > 0: score += 20 # MACDヒストグラム陽転
+        if df_d['HA_close'].iloc[-1] > df_d['HA_open'].iloc[-1]: score += 20 # 平均足陽線
+        if df_d['RSI'].iloc[-1] < 35: score += 30 # RSI売られすぎ
+
+        if score >= 70: judge = "🚀 超精密買"
+        elif score >= 30: judge = "✨ 買目線"
+        elif score <= -30: judge = "☔ 売目線"
         else: judge = "☁️ 様子見"
 
         return {
             "コード": ticker.replace(".T",""), "和名": NAME_MAP.get(ticker, "不明"),
             "現在値": int(price), "判定": judge, "スコア": int(score), 
-            "週RSI": round(rsi_w, 1), "予想底値": floor, "目標": target_p, 
-            "df": df_d, "反発": "🎯 反発開始" if (is_oversold and is_d_up) else ("⏳ 底打ち模索" if is_oversold else "-")
+            "RSI": round(df_d['RSI'].iloc[-1], 1), "精密指値": precision_floor, 
+            "目標1(20日)": int(df_d['MA20'].iloc[-1]), "目標2(60日)": int(df_d['MA60'].iloc[-1]), 
+            "df": df_d, "型": " / ".join(patterns) if patterns else "平常"
         }
     except: return None
 
 # --- 4. 画面構築 ---
-st.title("🏹 Stock Sniper Pro")
+st.title("🏹 Stock Sniper Strategy Pro")
 
-with st.expander("📚 戦略ガイド（判定・チャート）"):
+with st.expander("📚 解析ロジックの解説"):
     st.markdown("""
-    - **🔥 特級買 / ✨ 買目線**: 上昇トレンド。押し目買い候補。
-    - **📉 特級売 / ☔ 売目線**: 下落トレンド。空売り候補。
-    - **🛡️ 予想底値 (青点線)**: 物理的な反発点。指値の目安。
+    - **精密指値 (青点線)**: 統計的下限と過去の反発安値を合成した、最も反発確率の高い価格。
+    - **目標1 (緑点線)**: 現実的なリバウンド目標（20日線）。
+    - **目標2 (赤点線)**: トレンド転換の壁（60日線）。
+    - **型**: 酒田五法やチャートパターンから「現在の局面」を自動判別。
     """)
 
 # サイドバー
@@ -110,75 +141,65 @@ saved_text = load_saved_list()
 if mode == "📊 市場全体":
     ticker_list = list(NAME_MAP.keys()); is_force = False
 elif mode == "⭐ 保存リスト":
-    input_area = st.sidebar.text_area("ウォッチリスト編集", saved_text, height=150, key="sidebar_list")
-    col_save, col_clear = st.sidebar.columns(2)
-    if col_save.button("💾 リストを保存"):
-        save_list(input_area); st.rerun()
-    if col_clear.button("🗑️ 全消去"):
-        save_list(""); st.rerun()
+    input_area = st.sidebar.text_area("ウォッチリスト", saved_text, height=150)
+    c_s, c_c = st.sidebar.columns(2)
+    if c_s.button("💾 保存"): save_list(input_area); st.rerun()
+    if c_c.button("🗑️ 全消去"): save_list(""); st.rerun()
     ticker_list = [f"{t.strip()}.T" if t.strip().isdigit() else t.strip() for t in input_area.split(',') if t.strip()]
     is_force = True
 else:
-    input_area = st.sidebar.text_area("銘柄コード入力", "9984, 6330", height=100)
+    input_area = st.sidebar.text_area("銘柄入力", "9984, 6330", height=100)
     ticker_list = [f"{t.strip()}.T" if t.strip().isdigit() else t.strip() for t in input_area.split(',') if t.strip()]
     is_force = True
 
-min_p = st.sidebar.number_input("下限価格", 0, 100000, 1000)
-max_p = st.sidebar.number_input("上限価格", 0, 100000, 100000)
+min_p = st.sidebar.number_input("下限", 0, 100000, 1000)
+max_p = st.sidebar.number_input("上限", 0, 100000, 100000)
 
-# スキャン結果を保持するための Session State
-if 'scan_results' not in st.session_state:
-    st.session_state.scan_results = None
+if 'scan_results' not in st.session_state: st.session_state.scan_results = None
 
 c1, c2, c3 = st.columns(3)
 if c1.button("📑 全件スキャン"): st.session_state.scan_results = ("all", ticker_list)
 if c2.button("🚀 買い・反発狙い"): st.session_state.scan_results = ("buy", ticker_list)
 if c3.button("📉 空売り狙い"): st.session_state.scan_results = ("short", ticker_list)
 
-# 解析と表示の実行
 if st.session_state.scan_results:
-    scan_type, target_tickers = st.session_state.scan_results
+    s_type, targets = st.session_state.scan_results
     results = []
     bar = st.progress(0)
-    for i, t in enumerate(target_tickers):
+    for i, t in enumerate(targets):
         res = analyze_stock(t, min_p, max_p, is_force)
         if res: results.append(res)
-        bar.progress((i + 1) / len(target_tickers))
+        bar.progress((i + 1) / len(targets))
     
     if results:
         df_res = pd.DataFrame(results).sort_values("スコア", ascending=False)
-        
-        # ボタンの種類に応じたフィルタリング
-        if scan_type == "buy":
-            df_res = df_res[df_res['スコア'] >= 20]
-        elif scan_type == "short":
-            df_res = df_res[df_res['スコア'] <= -20]
+        if s_type == "buy": df_res = df_res[df_res['スコア'] >= 20]
+        elif s_type == "short": df_res = df_res[df_res['スコア'] <= -20]
 
         for _, row in df_res.iterrows():
-            with st.expander(f"{row['判定']} | {row['和名']} ({row['コード']}) - {row['現在値']}円"):
-                # チャート表示
+            with st.expander(f"{row['判定']} | {row['和名']} ({row['コード']}) {row['型']}"):
+                # --- チャート表示 ---
                 fig = go.Figure()
                 fig.add_trace(go.Candlestick(x=row['df'].index, open=row['df']['Open'], high=row['df']['High'], low=row['df']['Low'], close=row['df']['Close'], name='価格'))
-                fig.add_trace(go.Scatter(x=row['df'].index, y=row['df']['MA60'], line=dict(color='orange', width=1.5), name='60MA'))
-                fig.add_hline(y=row['予想底値'], line_dash="dash", line_color="royalblue", annotation_text="指値目安")
-                fig.add_hline(y=row['目標'], line_dash="dash", line_color="crimson", annotation_text="目標")
-                fig.update_layout(height=400, margin=dict(l=0, r=0, b=0, t=0), showlegend=False, xaxis_rangeslider_visible=False, yaxis=dict(fixedrange=True), xaxis=dict(fixedrange=True))
+                fig.add_trace(go.Scatter(x=row['df'].index, y=row['df']['MA20'], line=dict(color='green', width=1), name='20MA'))
+                fig.add_trace(go.Scatter(x=row['df'].index, y=row['df']['MA60'], line=dict(color='orange', width=1), name='60MA'))
+                
+                # 水平線
+                fig.add_hline(y=row['精密指値'], line_dash="dash", line_color="royalblue", annotation_text="精密指値")
+                fig.add_hline(y=row['目標1(20日)'], line_dash="dash", line_color="green", annotation_text="目標1")
+                fig.add_hline(y=row['目標2(60日)'], line_dash="dash", line_color="red", annotation_text="目標2")
+                
+                fig.update_layout(height=450, margin=dict(l=0, r=0, b=0, t=0), showlegend=False, xaxis_rangeslider_visible=False, yaxis=dict(fixedrange=True), xaxis=dict(fixedrange=True))
                 st.plotly_chart(fig, use_container_width=True, config={'staticPlot': True})
                 
-                # 情報表示 & 保存ボタン
+                # 情報表示 & 保存
                 c_inf, c_btn = st.columns([2, 1])
                 with c_inf:
-                    st.write(f"スコア: {row['スコア']}点 | 指値目安: {row['予想底値']}円")
+                    st.write(f"**スコア:** {row['スコア']} | **型:** {row['型']}")
+                    st.write(f"**精密指値:** {row['精密指値']}円 / **RSI:** {row['RSI']}")
                 with c_btn:
-                    # すべての検索タイプで保存ボタンを表示
-                    if st.button(f"⭐ 保存", key=f"add_{scan_type}_{row['コード']}"):
-                        if add_to_list(row['コード']):
-                            st.success(f"{row['和名']} を保存しました")
-                            st.rerun()
-                        else:
-                            st.info("既にリストにあります")
+                    if st.button(f"⭐ 保存", key=f"add_{s_type}_{row['コード']}"):
+                        if add_to_list(row['コード']): st.success(f"保存しました"); st.rerun()
         
         st.divider()
-        st.dataframe(df_res.drop(columns=['df', '反発']), use_container_width=True)
-    else:
-        st.warning("条件に合う銘柄は見つかりませんでした。")
+        st.dataframe(df_res.drop(columns=['df']), use_container_width=True)
