@@ -5,7 +5,7 @@ import streamlit as st
 import plotly.graph_objects as go
 import os
 
-# --- 1. アプリ設定 ---
+# --- 1. アプリ基本設定 ---
 st.set_page_config(layout="wide", page_title="Stock Sniper Pro", page_icon="🦅")
 
 # --- 2. データベース & 保存機能 ---
@@ -105,6 +105,25 @@ def analyze_stock(ticker, min_p, max_p, is_force=False):
 # --- 4. 画面構築 ---
 st.title("🏹 Stock Sniper Strategy Pro")
 
+# --- ガイド表記の復活 ---
+with st.expander("📚 戦略ガイド（ラインの意味・スコア目安）"):
+    st.markdown("""
+    ### 📊 チャートの4本線の読み方
+    | 線 の 色 | 名称 | 意味・アクション |
+    | :--- | :--- | :--- |
+    | **🔵 青点線** | **精密指値** | **入口。** 統計的地面。ここで買う。 |
+    | **🟢 緑点線** | **利確1** | **出口。** 20日線付近。半分利確を推奨。 |
+    | **🔴 赤点線** | **利確2** | **大本命。** 60日線などの強力な節目。 |
+    | **🟠 橙実線** | **MA60** | **境界。** これより上なら強気、下なら弱気。 |
+
+    ### 🧠 判定スコアの目安
+    - **🚀 超精密買 (60+)**: 上昇一致。全力で押し目を待つ局面。
+    - **✨ 買目線 (20〜59)**: 上昇傾向。反発を確認してエントリー。
+    - **☁️ 様子見 (-19〜19)**: 揉み合い。物理的優位性なし。
+    - **☔ 売目線 (-20〜-59)**: 下落傾向。戻り売りの準備。
+    - **📉 特級売 (-60以下)**: 下落の力が最大。積極的な空売り。
+    """)
+
 # サイドバー
 st.sidebar.title("💰 検索・保存管理")
 mode = st.sidebar.radio("検索対象", ["📊 市場全体", "⭐ 保存リスト", "📝 自由入力"])
@@ -154,7 +173,6 @@ if st.session_state.scan_results:
             st.success(f"{added_count} 銘柄追加しました。"); st.rerun()
 
         for _, row in df_res.iterrows():
-            # ★ タイトルに「指値・利確1・利確2」をすべて表示
             label = f"{row['判定']} | {row['和名']} ({row['コード']}) 🟢 {row['距離']} | 🎯1:{row['利確1']}円 / 🎯2:{row['利確2']}円"
             with st.expander(label):
                 fig = go.Figure()
@@ -177,5 +195,4 @@ if st.session_state.scan_results:
                     if st.button(f"⭐ 保存", key=f"add_{s_type}_{row['コード']}"):
                         if add_bulk_to_list([row['コード']]): st.success("保存完了"); st.rerun()
         st.divider()
-        # ★ 下の表にも「指値・利確1・利確2」を数値で表示
         st.dataframe(df_res.drop(columns=['df', 'is_buy']), use_container_width=True)
