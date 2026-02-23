@@ -49,7 +49,7 @@ def add_to_list(ticker_code):
         return True
     return False
 
-# --- 3. 高精度解析エンジン ---
+# --- 3. 高精度・双方向解析エンジン ---
 def analyze_stock(ticker, min_p, max_p, is_force=False):
     try:
         tkr = yf.Ticker(ticker)
@@ -59,57 +59,51 @@ def analyze_stock(ticker, min_p, max_p, is_force=False):
         price = df_d.iloc[-1]['Close']
         if not is_force and not (min_p <= price <= max_p): return None
 
-        # テクニカル指標算出
+        # 指標算出
         df_d['MA20'] = df_d['Close'].rolling(20).mean()
         df_d['MA60'] = df_d['Close'].rolling(60).mean()
-        
-        # MACD
         macd = ta.macd(df_d['Close'])
         df_d = pd.concat([df_d, macd], axis=1)
-        
-        # RSI
         df_d['RSI'] = ta.rsi(df_d['Close'], length=14)
-        
-        # 平均足
         ha_df = ta.ha(df_d['Open'], df_d['High'], df_d['Low'], df_d['Close'])
         df_d = pd.concat([df_d, ha_df], axis=1)
 
-        # --- パターン検知ロジック ---
         patterns = []
-        pattern_score = 0
+        score = 0
         
-        # 1. ダブルボトム近傍 (過去60日安値との乖離1.5%以内)
+        # --- 買いパターン (+) ---
         low_60 = df_d['Low'].tail(60).min()
         if price <= low_60 * 1.015:
             patterns.append("🏺 Wボトム圏")
-            pattern_score += 30
-            
-        # 2. フラッグ/スクエア (直近10日の振幅が3%以内)
-        recent_range = (df_d['High'].tail(10).max() - df_d['Low'].tail(10).min()) / price
-        if recent_range < 0.03:
-            patterns.append("🏁 旗形/保合")
-            pattern_score += 20
-
-        # 3. 酒田五法 (赤三兵)
+            score += 30
         if all(df_d['Close'].tail(3) > df_d['Open'].tail(3)) and all(df_d['Close'].tail(3).diff().dropna() > 0):
             patterns.append("🔥 赤三兵")
-            pattern_score += 40
+            score += 40
+        if df_d['MACDh_12_26_9'].iloc[-1] > 0: score += 20
+        if df_d['HA_close'].iloc[-1] > df_d['HA_open'].iloc[-1]: score += 20
+        if df_d['RSI'].iloc[-1] < 35: score += 30
 
-        # 精密指値 (コンフルエンス)
-        # ボリバン-2σと過去安値の平均をとる
+        # --- 売りパターン (-) ---
+        high_60 = df_d['High'].tail(60).max()
+        if price >= high_60 * 0.985:
+            patterns.append("🏔️ Wトップ圏")
+            score -= 30
+        if all(df_d['Close'].tail(3) < df_d['Open'].tail(3)) and all(df_d['Close'].tail(3).diff().dropna() < 0):
+            patterns.append("💀 黒三兵")
+            score -= 40
+        if df_d['MACDh_12_26_9'].iloc[-1] < 0: score -= 20
+        if df_d['HA_close'].iloc[-1] < df_d['HA_open'].iloc[-1]: score -= 20
+        if df_d['RSI'].iloc[-1] > 65: score -= 30
+
+        # 精密指値 (買い用)
         std20 = df_d['Close'].rolling(20).std().iloc[-1]
         bb_low = df_d['MA20'].iloc[-1] - (std20 * 2)
         precision_floor = int((bb_low + low_60) / 2)
 
-        # 判定
-        score = pattern_score
-        if df_d['MACDh_12_26_9'].iloc[-1] > 0: score += 20 # MACDヒストグラム陽転
-        if df_d['HA_close'].iloc[-1] > df_d['HA_open'].iloc[-1]: score += 20 # 平均足陽線
-        if df_d['RSI'].iloc[-1] < 35: score += 30 # RSI売られすぎ
-
-        if score >= 70: judge = "🚀 超精密買"
-        elif score >= 30: judge = "✨ 買目線"
-        elif score <= -30: judge = "☔ 売目線"
+        if score >= 60: judge = "🚀 超精密買"
+        elif score >= 20: judge = "✨ 買目線"
+        elif score <= -60: judge = "📉 特級売"
+        elif score <= -20: judge = "☔ 売目線"
         else: judge = "☁️ 様子見"
 
         return {
@@ -124,18 +118,9 @@ def analyze_stock(ticker, min_p, max_p, is_force=False):
 # --- 4. 画面構築 ---
 st.title("🏹 Stock Sniper Strategy Pro")
 
-with st.expander("📚 解析ロジックの解説"):
-    st.markdown("""
-    - **精密指値 (青点線)**: 統計的下限と過去の反発安値を合成した、最も反発確率の高い価格。
-    - **目標1 (緑点線)**: 現実的なリバウンド目標（20日線）。
-    - **目標2 (赤点線)**: トレンド転換の壁（60日線）。
-    - **型**: 酒田五法やチャートパターンから「現在の局面」を自動判別。
-    """)
-
 # サイドバー
 st.sidebar.title("💰 検索・保存管理")
 mode = st.sidebar.radio("検索対象", ["📊 市場全体", "⭐ 保存リスト", "📝 自由入力"])
-
 saved_text = load_saved_list()
 
 if mode == "📊 市場全体":
@@ -178,28 +163,21 @@ if st.session_state.scan_results:
 
         for _, row in df_res.iterrows():
             with st.expander(f"{row['判定']} | {row['和名']} ({row['コード']}) {row['型']}"):
-                # --- チャート表示 ---
                 fig = go.Figure()
                 fig.add_trace(go.Candlestick(x=row['df'].index, open=row['df']['Open'], high=row['df']['High'], low=row['df']['Low'], close=row['df']['Close'], name='価格'))
                 fig.add_trace(go.Scatter(x=row['df'].index, y=row['df']['MA20'], line=dict(color='green', width=1), name='20MA'))
                 fig.add_trace(go.Scatter(x=row['df'].index, y=row['df']['MA60'], line=dict(color='orange', width=1), name='60MA'))
-                
-                # 水平線
-                fig.add_hline(y=row['精密指値'], line_dash="dash", line_color="royalblue", annotation_text="精密指値")
+                fig.add_hline(y=row['精密指値'], line_dash="dash", line_color="royalblue", annotation_text="指値目安")
                 fig.add_hline(y=row['目標1(20日)'], line_dash="dash", line_color="green", annotation_text="目標1")
                 fig.add_hline(y=row['目標2(60日)'], line_dash="dash", line_color="red", annotation_text="目標2")
-                
                 fig.update_layout(height=450, margin=dict(l=0, r=0, b=0, t=0), showlegend=False, xaxis_rangeslider_visible=False, yaxis=dict(fixedrange=True), xaxis=dict(fixedrange=True))
                 st.plotly_chart(fig, use_container_width=True, config={'staticPlot': True})
                 
-                # 情報表示 & 保存
                 c_inf, c_btn = st.columns([2, 1])
                 with c_inf:
-                    st.write(f"**スコア:** {row['スコア']} | **型:** {row['型']}")
-                    st.write(f"**精密指値:** {row['精密指値']}円 / **RSI:** {row['RSI']}")
+                    st.write(f"**スコア:** {row['スコア']} | **精密指値:** {row['精密指値']}円")
                 with c_btn:
                     if st.button(f"⭐ 保存", key=f"add_{s_type}_{row['コード']}"):
-                        if add_to_list(row['コード']): st.success(f"保存しました"); st.rerun()
-        
+                        if add_to_list(row['コード']): st.success("保存完了"); st.rerun()
         st.divider()
         st.dataframe(df_res.drop(columns=['df']), use_container_width=True)
