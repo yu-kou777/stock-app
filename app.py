@@ -34,19 +34,15 @@ def load_saved_list():
     return ""
 
 def save_list(text):
-    # 重複を排除し、カンマで繋ぐ（常に累積を意識したクレンジング）
     items = [i.strip() for i in text.replace('\n', ',').split(',') if i.strip()]
     cleaned_text = ", ".join(sorted(set(items), key=items.index))
     with open(SAVE_FILE, "w", encoding="utf-8") as f:
         f.write(cleaned_text)
 
 def add_bulk_to_list(ticker_codes):
-    """複数の銘柄を一括で累積保存する"""
     current = load_saved_list()
     current_items = [i.strip() for i in current.split(',') if i.strip()]
     new_items = [i.replace(".T", "").strip() for i in ticker_codes]
-    
-    # 既存のリストに新しいリストを合体（重複は自動で消える）
     combined = current_items + new_items
     save_list(", ".join(combined))
     return len(set(combined)) - len(set(current_items))
@@ -57,7 +53,6 @@ def analyze_stock(ticker, min_p, max_p, is_force=False):
         tkr = yf.Ticker(ticker)
         df_d = tkr.history(period="6mo", interval="1d")
         if df_d.empty or len(df_d) < 60: return None
-
         price = df_d.iloc[-1]['Close']
         if not is_force and not (min_p <= price <= max_p): return None
 
@@ -101,8 +96,24 @@ def analyze_stock(ticker, min_p, max_p, is_force=False):
 # --- 4. 画面構築 ---
 st.title("🏹 Stock Sniper Strategy Pro")
 
-with st.expander("📚 ガイド"):
-    st.markdown("- **保存**: 新しい銘柄を現在のリストに「追記」します。\n- **一括保存**: 表示されている全銘柄をまとめてリストに追加します。")
+# ★ 2.3を盛り込んだ強化版ガイド
+with st.expander("📚 戦略ガイド（ラインの意味・スコア目安）"):
+    st.markdown("""
+    ### 📊 チャートの4本線の読み方
+    | 線 の 色 | 名称 | 意味・アクション |
+    | :--- | :--- | :--- |
+    | **🔵 青点線** | **精密指値** | **入口。** 統計的に最も反発しやすい地面。ここで買う。 |
+    | **🟢 緑点線** | **利確1** | **出口。** 20日移動平均線。最初の反発の壁。半分利確を推奨。 |
+    | **🔴 赤点線** | **利確2** | **大本命。** 60日線などの強力な節目。全決済の目安。 |
+    | **🟠 橙実線** | **MA60** | **トレンドの境界線。** これより上なら強気、下なら弱気。 |
+
+    ### 🧠 判定スコアの目安
+    - **🚀 超精密買 (60+)**: 週足・日足が一致。物理的に強い上昇。全力で押し目を待つ。
+    - **✨ 買目線 (20〜59)**: 上昇傾向。反発を確認してからのエントリーが吉。
+    - **☁️ 様子見 (-19〜19)**: 揉み合い。物理的な優位性がないため、手を出さない。
+    - **☔ 売目線 (-20〜-59)**: 下落傾向。戻り売り、または空売りの準備。
+    - **📉 特級売 (-60以下)**: 物理的に下落の力が最大。積極的に空売りを検討。
+    """)
 
 # サイドバー
 st.sidebar.title("💰 検索・保存管理")
@@ -147,7 +158,6 @@ if st.session_state.scan_results:
         if s_type == "buy": df_res = df_res[df_res['スコア'] >= 20]
         elif s_type == "short": df_res = df_res[df_res['スコア'] <= -20]
 
-        # ★一括保存ボタンの配置
         target_codes = df_res['コード'].tolist()
         if st.button(f"📥 表示中の {len(target_codes)} 銘柄をすべて保存リストに追加"):
             added_count = add_bulk_to_list(target_codes)
