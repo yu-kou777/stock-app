@@ -49,7 +49,7 @@ def add_to_list(ticker_code):
         return True
     return False
 
-# --- 3. 高精度・双方向解析エンジン ---
+# --- 3. 解析エンジン ---
 def analyze_stock(ticker, min_p, max_p, is_force=False):
     try:
         tkr = yf.Ticker(ticker)
@@ -59,7 +59,7 @@ def analyze_stock(ticker, min_p, max_p, is_force=False):
         price = df_d.iloc[-1]['Close']
         if not is_force and not (min_p <= price <= max_p): return None
 
-        # 指標算出
+        # テクニカル指標算出
         df_d['MA20'] = df_d['Close'].rolling(20).mean()
         df_d['MA60'] = df_d['Close'].rolling(60).mean()
         macd = ta.macd(df_d['Close'])
@@ -71,34 +71,32 @@ def analyze_stock(ticker, min_p, max_p, is_force=False):
         patterns = []
         score = 0
         
-        # --- 買いパターン (+) ---
+        # --- 買いパターン ---
         low_60 = df_d['Low'].tail(60).min()
         if price <= low_60 * 1.015:
             patterns.append("🏺 Wボトム圏")
             score += 30
-        if all(df_d['Close'].tail(3) > df_d['Open'].tail(3)) and all(df_d['Close'].tail(3).diff().dropna() > 0):
-            patterns.append("🔥 赤三兵")
-            score += 40
+        if all(df_d['Close'].tail(3) > df_d['Open'].tail(3)):
+            score += 20
         if df_d['MACDh_12_26_9'].iloc[-1] > 0: score += 20
-        if df_d['HA_close'].iloc[-1] > df_d['HA_open'].iloc[-1]: score += 20
         if df_d['RSI'].iloc[-1] < 35: score += 30
 
-        # --- 売りパターン (-) ---
+        # --- 売りパターン ---
         high_60 = df_d['High'].tail(60).max()
         if price >= high_60 * 0.985:
             patterns.append("🏔️ Wトップ圏")
             score -= 30
-        if all(df_d['Close'].tail(3) < df_d['Open'].tail(3)) and all(df_d['Close'].tail(3).diff().dropna() < 0):
-            patterns.append("💀 黒三兵")
-            score -= 40
+        if all(df_d['Close'].tail(3) < df_d['Open'].tail(3)):
+            score -= 20
         if df_d['MACDh_12_26_9'].iloc[-1] < 0: score -= 20
-        if df_d['HA_close'].iloc[-1] < df_d['HA_open'].iloc[-1]: score -= 20
         if df_d['RSI'].iloc[-1] > 65: score -= 30
 
-        # 精密指値 (買い用)
         std20 = df_d['Close'].rolling(20).std().iloc[-1]
         bb_low = df_d['MA20'].iloc[-1] - (std20 * 2)
+        bb_high = df_d['MA20'].iloc[-1] + (std20 * 2)
+        
         precision_floor = int((bb_low + low_60) / 2)
+        precision_ceiling = int((bb_high + high_60) / 2)
 
         if score >= 60: judge = "🚀 超精密買"
         elif score >= 20: judge = "✨ 買目線"
@@ -106,17 +104,36 @@ def analyze_stock(ticker, min_p, max_p, is_force=False):
         elif score <= -20: judge = "☔ 売目線"
         else: judge = "☁️ 様子見"
 
+        is_buy_mode = score >= 0
+        target1 = int(df_d['MA20'].iloc[-1])
+        target2 = int(df_d['MA60'].iloc[-1]) if is_buy_mode else precision_floor
+
         return {
             "コード": ticker.replace(".T",""), "和名": NAME_MAP.get(ticker, "不明"),
             "現在値": int(price), "判定": judge, "スコア": int(score), 
-            "RSI": round(df_d['RSI'].iloc[-1], 1), "精密指値": precision_floor, 
-            "目標1(20日)": int(df_d['MA20'].iloc[-1]), "目標2(60日)": int(df_d['MA60'].iloc[-1]), 
-            "df": df_d, "型": " / ".join(patterns) if patterns else "平常"
+            "精密底値": precision_floor, "精密天井": precision_ceiling,
+            "目標1": target1, "目標2": target2, "df": df_d, "型": " / ".join(patterns) if patterns else "平常",
+            "is_buy": is_buy_mode
         }
     except: return None
 
 # --- 4. 画面構築 ---
 st.title("🏹 Stock Sniper Strategy Pro")
+
+# 📚 解説ガイドの復活
+with st.expander("📚 戦略ガイド（判定・チャート・利確のルール）"):
+    st.markdown("""
+    ### 【判定の定義】
+    - **🚀 超精密買 / ✨ 買目線**: 週足・日足の勢いが一致。押し目や反発を狙える強い買い局面。
+    - **📉 特級売 / ☔ 売目線**: 下落圧力が強い。戻り売り、または追随の空売り局面。
+    - **🏺 Wボトム / 🏔️ Wトップ**: 過去の物理的な反発点・抵抗点に到達。転換のサイン。
+
+    ### 【チャートラインの意味】
+    - **🔵 青点線（精密指値）**: 統計的下限と過去安値を合成。**「買い」の最も有利な入口。**
+    - **🟠 橙点線（精密天井）**: 戻り売りの限界点。**「空売り」の最も有利な入口。**
+    - **🟢 緑点線（利確1）**: 20日移動平均線。**最初の利益確定ポイント。**
+    - **🔴 赤点線（利確2）**: 60日移動平均線（買い時）または精密底値（売り時）。**本命の出口。**
+    """)
 
 # サイドバー
 st.sidebar.title("💰 検索・保存管理")
@@ -167,17 +184,24 @@ if st.session_state.scan_results:
                 fig.add_trace(go.Candlestick(x=row['df'].index, open=row['df']['Open'], high=row['df']['High'], low=row['df']['Low'], close=row['df']['Close'], name='価格'))
                 fig.add_trace(go.Scatter(x=row['df'].index, y=row['df']['MA20'], line=dict(color='green', width=1), name='20MA'))
                 fig.add_trace(go.Scatter(x=row['df'].index, y=row['df']['MA60'], line=dict(color='orange', width=1), name='60MA'))
-                fig.add_hline(y=row['精密指値'], line_dash="dash", line_color="royalblue", annotation_text="指値目安")
-                fig.add_hline(y=row['目標1(20日)'], line_dash="dash", line_color="green", annotation_text="目標1")
-                fig.add_hline(y=row['目標2(60日)'], line_dash="dash", line_color="red", annotation_text="目標2")
+                
+                if row['is_buy']:
+                    fig.add_hline(y=row['精密底値'], line_dash="dash", line_color="royalblue", annotation_text="指値(入)")
+                    fig.add_hline(y=row['目標1'], line_dash="dash", line_color="green", annotation_text="利確1")
+                    fig.add_hline(y=row['目標2'], line_dash="dash", line_color="red", annotation_text="利確2")
+                else:
+                    fig.add_hline(y=row['精密天井'], line_dash="dash", line_color="orange", annotation_text="戻り(入)")
+                    fig.add_hline(y=row['目標1'], line_dash="dash", line_color="green", annotation_text="利確1")
+                    fig.add_hline(y=row['目標2'], line_dash="dash", line_color="royalblue", annotation_text="利確2")
+                
                 fig.update_layout(height=450, margin=dict(l=0, r=0, b=0, t=0), showlegend=False, xaxis_rangeslider_visible=False, yaxis=dict(fixedrange=True), xaxis=dict(fixedrange=True))
                 st.plotly_chart(fig, use_container_width=True, config={'staticPlot': True})
                 
                 c_inf, c_btn = st.columns([2, 1])
                 with c_inf:
-                    st.write(f"**スコア:** {row['スコア']} | **精密指値:** {row['精密指値']}円")
+                    st.write(f"**スコア:** {row['スコア']} | **利確1:** {row['目標1']}円 | **利確2:** {row['目標2']}円")
                 with c_btn:
                     if st.button(f"⭐ 保存", key=f"add_{s_type}_{row['コード']}"):
                         if add_to_list(row['コード']): st.success("保存完了"); st.rerun()
         st.divider()
-        st.dataframe(df_res.drop(columns=['df']), use_container_width=True)
+        st.dataframe(df_res.drop(columns=['df', 'is_buy']), use_container_width=True)
