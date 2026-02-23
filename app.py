@@ -11,10 +11,9 @@ st.set_page_config(layout="wide", page_title="Stock Sniper Pro", page_icon="🦅
 # --- 2. データベース & 保存機能 ---
 SAVE_FILE = "watchlist.txt"
 
-# 主要銘柄の和名辞書（適宜追加可能です）
 NAME_MAP = {
     "8035.T": "東京エレクトロン", "6920.T": "レーザーテック", "6857.T": "アドバンテスト",
-    "6723.T": "ルネサスエレクトロニクス", "6758.T": "ソニーグループ", "6501.T": "日立製作所",
+    "6723.T": "ルネサス", "6758.T": "ソニーグループ", "6501.T": "日立製作所",
     "7735.T": "SCREEN", "6701.T": "NEC", "6702.T": "富士通", "6503.T": "三菱電機",
     "6861.T": "キーエンス", "6954.T": "ファナック", "6981.T": "村田製作所", "6971.T": "京セラ",
     "6902.T": "デンソー", "4063.T": "信越化学", "7203.T": "トヨタ自動車", "7267.T": "ホンダ",
@@ -32,19 +31,22 @@ def load_saved_list():
     if os.path.exists(SAVE_FILE):
         with open(SAVE_FILE, "r", encoding="utf-8") as f:
             return f.read().strip()
-    return "9984, 6330"
+    return ""
 
 def save_list(text):
+    # 重複や余計なカンマを掃除して保存
+    items = [i.strip() for i in text.split(',') if i.strip()]
+    cleaned_text = ", ".join(sorted(set(items), key=items.index))
     with open(SAVE_FILE, "w", encoding="utf-8") as f:
-        f.write(text)
+        f.write(cleaned_text)
 
 def add_to_list(ticker_code):
     current = load_saved_list()
-    # 銘柄がまだリストにない場合のみ追加
     code_only = ticker_code.replace(".T", "")
-    if code_only not in current:
-        new_list = f"{current}, {code_only}" if current else code_only
-        save_list(new_list)
+    items = [i.strip() for i in current.split(',') if i.strip()]
+    if code_only not in items:
+        items.append(code_only)
+        save_list(", ".join(items))
         return True
     return False
 
@@ -59,28 +61,23 @@ def analyze_stock(ticker, min_p, max_p, is_force=False):
         price = df_d.iloc[-1]['Close']
         if not is_force and not (min_p <= price <= max_p): return None
 
-        # 指標
         df_d['MA60'] = df_d['Close'].rolling(60).mean()
         df_w['MA20'] = df_w['Close'].rolling(20).mean()
         target_p = int(df_w['MA20'].iloc[-1])
         rsi_w = ta.rsi(df_w['Close'], length=14).iloc[-1]
         dev_w = (price - target_p) / target_p * 100
 
-        # 底値予測
         std20 = df_d['Close'].rolling(20).std().iloc[-1]
         ma20 = df_d['Close'].rolling(20).mean().iloc[-1]
         floor = int(ma20 - (std20 * 2))
 
-        # トレンド
         is_w_up = df_w['Close'].iloc[-1] > df_w['Open'].iloc[-1]
         is_d_up = df_d['Close'].iloc[-1] > df_d['Open'].iloc[-1]
         
-        # スコア
         score = (50 if is_w_up else -50) + (30 if is_d_up else -30)
         is_oversold = rsi_w < 35 or dev_w < -15
         if is_oversold: score += 40
 
-        # 判定
         if score >= 60: judge = "🔥 特級買"
         elif score >= 20: judge = "✨ 買目線"
         elif score <= -60: judge = "📉 特級売"
@@ -98,37 +95,32 @@ def analyze_stock(ticker, min_p, max_p, is_force=False):
 # --- 4. 画面構築 ---
 st.title("🏹 Stock Sniper Pro")
 
-# 📚 全判定の説明プルダウン
-with st.expander("📚 戦略ガイド：判定の定義と使い方"):
+with st.expander("📚 戦略ガイド（判定・チャート）"):
     st.markdown("""
-    ### 【判定カテゴリー】
-    * **🔥 特級買 (Score 60+)**: 週足・日足が共に陽転。物理的な上昇トレンドの「本流」に乗っている状態。
-    * **✨ 買目線 (Score 20+)**: トレンドは上向きだが、勢いが限定的。押し目買いの候補。
-    * **📉 特級売 (Score -60-)**: 週足・日足が共に陰転。空売りの物理的優位性が高い状態。
-    * **☔ 売目線 (Score -20-)**: 下落傾向。戻り売りのポイントを探る局面。
-    * **☁️ 様子見**: 方向感が不透明。無理に手を出さず、次の波を待つ時間。
-
-    ### 【特殊シグナル】
-    * **🎯 反発開始**: 売られすぎ（RSI低）から日足が陽転。短期リバウンドの「指値成功」の瞬間。
-    * **⏳ 底打ち模索**: まだ下げ止まっていないが、反発フロア（青点線）に接近している警戒態勢。
-
-    ### 【チャート活用】
-    * **青点線 (予想底値)**: 過去の統計から導いた反発の地面。ここに**指値**を置く。
-    * **赤点線 (目標)**: 週足移動平均線。ここが**利確（エグジット）**の目安。
+    - **🔥 特級買 / ✨ 買目線**: 上昇トレンド。押し目買いの好機。
+    - **📉 特級売 / ☔ 売目線**: 下落トレンド。戻り売りの局面。
+    - **🛡️ 予想底値 (青点線)**: 統計的リバウンド地点。指値の目安。
+    - **🎯 目標 (赤点線)**: 週足移動平均線。利確の目安。
     """)
 
-# サイドバー：戦略司令室
+# サイドバー
 st.sidebar.title("💰 検索・保存管理")
 mode = st.sidebar.radio("検索対象", ["📊 市場全体", "⭐ 保存リスト", "📝 自由入力"])
+
+# 保存リストの読み込み
+saved_text = load_saved_list()
 
 if mode == "📊 市場全体":
     ticker_list = list(NAME_MAP.keys()); is_force = False
 elif mode == "⭐ 保存リスト":
-    saved_text = load_saved_list()
     input_area = st.sidebar.text_area("ウォッチリスト編集", saved_text, height=150)
     col_save, col_clear = st.sidebar.columns(2)
-    if col_save.button("💾 保存"): save_list(input_area); st.sidebar.success("保存完了")
-    if col_clear.button("🗑️ 全消去"): save_list(""); st.rerun() # 再読み込み
+    if col_save.button("💾 リストを保存"):
+        save_list(input_area)
+        st.rerun() # ★強制再読み込み
+    if col_clear.button("🗑️ 全消去"):
+        save_list("")
+        st.rerun() # ★強制再読み込み
     ticker_list = [f"{t.strip()}.T" if t.strip().isdigit() else t.strip() for t in input_area.split(',') if t.strip()]
     is_force = True
 else:
@@ -159,7 +151,7 @@ if btn_all or btn_buy or btn_short:
 
         for _, row in df_res.iterrows():
             with st.expander(f"{row['判定']} | {row['和名']} ({row['コード']}) - {row['現在値']}円"):
-                # --- グラフ表示 ---
+                # --- チャート表示 ---
                 fig = go.Figure()
                 fig.add_trace(go.Candlestick(x=row['df'].index, open=row['df']['Open'], high=row['df']['High'], low=row['df']['Low'], close=row['df']['Close'], name='価格'))
                 fig.add_trace(go.Scatter(x=row['df'].index, y=row['df']['MA60'], line=dict(color='orange', width=1.5), name='60MA'))
@@ -171,12 +163,15 @@ if btn_all or btn_buy or btn_short:
                 # 情報表示 & 保存ボタン
                 c_inf, c_btn = st.columns([2, 1])
                 with c_inf:
-                    st.write(f"スコア: {row['スコア']}点 | 週RSI: {row['週RSI']} | 指値目安: {row['予想底値']}円")
+                    st.write(f"スコア: {row['スコア']}点 | 指値目安: {row['予想底値']}円")
                 with c_btn:
-                    if st.button(f"⭐ リストに追加", key=f"add_{row['コード']}"):
-                        if add_to_list(row['コード']): st.toast(f"{row['和名']} を保存しました！")
-                        else: st.toast("既にリストにあります")
+                    # ★ ここで add_to_list を実行し、直後に st.rerun()
+                    if st.button(f"⭐ 保存", key=f"add_{row['コード']}"):
+                        if add_to_list(row['コード']):
+                            st.toast(f"{row['和名']} を追加しました！")
+                            st.rerun() # ★これが重要！
+                        else:
+                            st.toast("既にリストにあります")
         
         st.divider()
         st.dataframe(df_res.drop(columns=['df', '反発']), use_container_width=True)
-    else: st.warning("該当なし")
