@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 st.set_page_config(layout="wide", page_title="Stock Sniper Pro", page_icon="🦅")
 
 # --- 2. Discord Webhook 設定 ---
-DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1472281747000393902/Fbclh0R3R55w6ZnzhenJ24coaUPKy42abh3uPO-fRjfQulk9OwAq-Cf8cJQOe2U4SFme"
+DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1470471750482530360/-epGFysRsPUuTesBWwSxof0sa9Co3Rlp415mZ1mkX2v3PZRfxgZ2yPPHa1FvjxsMwlVX"
 
 # --- 3. 主要銘柄データベース (価格帯検索用) ---
 MARKET_DATABASE = {
