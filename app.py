@@ -34,9 +34,8 @@ def load_saved_list():
     return ""
 
 def save_list(text):
-    # 重複や余計なカンマを掃除して保存
     items = [i.strip() for i in text.split(',') if i.strip()]
-    cleaned_text = ", ".join(sorted(set(items), key=items.index))
+    cleaned_text = ", ".join(items)
     with open(SAVE_FILE, "w", encoding="utf-8") as f:
         f.write(cleaned_text)
 
@@ -97,30 +96,26 @@ st.title("🏹 Stock Sniper Pro")
 
 with st.expander("📚 戦略ガイド（判定・チャート）"):
     st.markdown("""
-    - **🔥 特級買 / ✨ 買目線**: 上昇トレンド。押し目買いの好機。
-    - **📉 特級売 / ☔ 売目線**: 下落トレンド。戻り売りの局面。
-    - **🛡️ 予想底値 (青点線)**: 統計的リバウンド地点。指値の目安。
-    - **🎯 目標 (赤点線)**: 週足移動平均線。利確の目安。
+    - **🔥 特級買 / ✨ 買目線**: 上昇トレンド。押し目買い候補。
+    - **📉 特級売 / ☔ 売目線**: 下落トレンド。空売り候補。
+    - **🛡️ 予想底値 (青点線)**: 物理的な反発点。指値の目安。
     """)
 
 # サイドバー
 st.sidebar.title("💰 検索・保存管理")
 mode = st.sidebar.radio("検索対象", ["📊 市場全体", "⭐ 保存リスト", "📝 自由入力"])
 
-# 保存リストの読み込み
 saved_text = load_saved_list()
 
 if mode == "📊 市場全体":
     ticker_list = list(NAME_MAP.keys()); is_force = False
 elif mode == "⭐ 保存リスト":
-    input_area = st.sidebar.text_area("ウォッチリスト編集", saved_text, height=150)
+    input_area = st.sidebar.text_area("ウォッチリスト編集", saved_text, height=150, key="sidebar_list")
     col_save, col_clear = st.sidebar.columns(2)
     if col_save.button("💾 リストを保存"):
-        save_list(input_area)
-        st.rerun() # ★強制再読み込み
+        save_list(input_area); st.rerun()
     if col_clear.button("🗑️ 全消去"):
-        save_list("")
-        st.rerun() # ★強制再読み込み
+        save_list(""); st.rerun()
     ticker_list = [f"{t.strip()}.T" if t.strip().isdigit() else t.strip() for t in input_area.split(',') if t.strip()]
     is_force = True
 else:
@@ -131,27 +126,37 @@ else:
 min_p = st.sidebar.number_input("下限価格", 0, 100000, 1000)
 max_p = st.sidebar.number_input("上限価格", 0, 100000, 100000)
 
-c1, c2, c3 = st.columns(3)
-btn_all = c1.button("📑 全件スキャン")
-btn_buy = c2.button("🚀 買い・反発狙い")
-btn_short = c3.button("📉 空売り狙い")
+# スキャン結果を保持するための Session State
+if 'scan_results' not in st.session_state:
+    st.session_state.scan_results = None
 
-if btn_all or btn_buy or btn_short:
+c1, c2, c3 = st.columns(3)
+if c1.button("📑 全件スキャン"): st.session_state.scan_results = ("all", ticker_list)
+if c2.button("🚀 買い・反発狙い"): st.session_state.scan_results = ("buy", ticker_list)
+if c3.button("📉 空売り狙い"): st.session_state.scan_results = ("short", ticker_list)
+
+# 解析と表示の実行
+if st.session_state.scan_results:
+    scan_type, target_tickers = st.session_state.scan_results
     results = []
     bar = st.progress(0)
-    for i, t in enumerate(ticker_list):
+    for i, t in enumerate(target_tickers):
         res = analyze_stock(t, min_p, max_p, is_force)
         if res: results.append(res)
-        bar.progress((i + 1) / len(ticker_list))
+        bar.progress((i + 1) / len(target_tickers))
     
     if results:
         df_res = pd.DataFrame(results).sort_values("スコア", ascending=False)
-        if btn_buy: df_res = df_res[df_res['スコア'] >= 20]
-        elif btn_short: df_res = df_res[df_res['スコア'] <= -20]
+        
+        # ボタンの種類に応じたフィルタリング
+        if scan_type == "buy":
+            df_res = df_res[df_res['スコア'] >= 20]
+        elif scan_type == "short":
+            df_res = df_res[df_res['スコア'] <= -20]
 
         for _, row in df_res.iterrows():
             with st.expander(f"{row['判定']} | {row['和名']} ({row['コード']}) - {row['現在値']}円"):
-                # --- チャート表示 ---
+                # チャート表示
                 fig = go.Figure()
                 fig.add_trace(go.Candlestick(x=row['df'].index, open=row['df']['Open'], high=row['df']['High'], low=row['df']['Low'], close=row['df']['Close'], name='価格'))
                 fig.add_trace(go.Scatter(x=row['df'].index, y=row['df']['MA60'], line=dict(color='orange', width=1.5), name='60MA'))
@@ -165,13 +170,15 @@ if btn_all or btn_buy or btn_short:
                 with c_inf:
                     st.write(f"スコア: {row['スコア']}点 | 指値目安: {row['予想底値']}円")
                 with c_btn:
-                    # ★ ここで add_to_list を実行し、直後に st.rerun()
-                    if st.button(f"⭐ 保存", key=f"add_{row['コード']}"):
+                    # すべての検索タイプで保存ボタンを表示
+                    if st.button(f"⭐ 保存", key=f"add_{scan_type}_{row['コード']}"):
                         if add_to_list(row['コード']):
-                            st.toast(f"{row['和名']} を追加しました！")
-                            st.rerun() # ★これが重要！
+                            st.success(f"{row['和名']} を保存しました")
+                            st.rerun()
                         else:
-                            st.toast("既にリストにあります")
+                            st.info("既にリストにあります")
         
         st.divider()
         st.dataframe(df_res.drop(columns=['df', '反発']), use_container_width=True)
+    else:
+        st.warning("条件に合う銘柄は見つかりませんでした。")
