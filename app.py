@@ -76,44 +76,34 @@ def analyze_stock(ticker, min_p, max_p, is_force=False):
         if df_d['MACDh_12_26_9'].iloc[-1] < 0: score -= 20
         if df_d['RSI'].iloc[-1] > 65: score -= 30
 
+        p_floor = int((df_d['MA20'].iloc[-1] - (std20 * 2) + low_60) / 2)
+        p_ceiling = int((df_d['MA20'].iloc[-1] + (std20 * 2) + high_60) / 2)
+
+        is_buy = score >= 0
+        entry_target = p_floor if is_buy else p_ceiling
+        dist_yen = price - entry_target if is_buy else entry_target - price
+        dist_pct = (dist_yen / price) * 100
+
         if score >= 60: judge = "🚀 超精密買"
         elif score >= 20: judge = "✨ 買目線"
         elif score <= -60: judge = "📉 特級売"
         elif score <= -20: judge = "☔ 売目線"
         else: judge = "☁️ 様子見"
 
-        p_floor = int((df_d['MA20'].iloc[-1] - (std20 * 2) + low_60) / 2)
-        p_ceiling = int((df_d['MA20'].iloc[-1] + (std20 * 2) + high_60) / 2)
-
-        # 指値までの距離計算
-        is_buy = score >= 0
-        entry_target = p_floor if is_buy else p_ceiling
-        dist_yen = price - entry_target if is_buy else entry_target - price
-        dist_pct = (dist_yen / price) * 100
+        target1 = int(df_d['MA20'].iloc[-1])
+        target2 = int(df_d['MA60'].iloc[-1]) if is_buy else p_floor
 
         return {
             "コード": ticker.replace(".T",""), "和名": NAME_MAP.get(ticker, "不明"),
             "現在値": int(price), "判定": judge, "スコア": int(score), 
-            "精密底": p_floor, "精密天井": p_ceiling,
-            "目標1": int(df_d['MA20'].iloc[-1]), "目標2": int(df_d['MA60'].iloc[-1]) if is_buy else p_floor,
-            "距離": f"あと {int(dist_yen)}円 ({dist_pct:.1f}%)" if dist_yen > 0 else "🎯 射程圏内",
+            "指値(入口)": entry_target, "利確1": target1, "利確2": target2,
+            "距離": f"あと {int(dist_yen)}円 ({dist_pct:.1f}%)" if dist_yen > 0 else "🎯 射程内",
             "df": df_d, "is_buy": is_buy
         }
     except: return None
 
 # --- 4. 画面構築 ---
 st.title("🏹 Stock Sniper Strategy Pro")
-
-with st.expander("📚 戦略ガイド（ラインの意味・スコア目安）"):
-    st.markdown("""
-    ### 📊 チャートの4本線の読み方
-    | 線 の 色 | 名称 | 意味・アクション |
-    | :--- | :--- | :--- |
-    | **🔵 青点線** | **精密指値** | **入口。** 反発地面。ここで買う。 |
-    | **🟢 緑点線** | **利確1** | **出口。** 最初の反発の壁。半分利確推奨。 |
-    | **🔴 赤点線** | **利確2** | **大本命。** 60日線。全決済目安。 |
-    | **🟠 橙実線** | **MA60** | **境界線。** 上なら強気、下なら弱気。 |
-    """)
 
 # サイドバー
 st.sidebar.title("💰 検索・保存管理")
@@ -164,30 +154,28 @@ if st.session_state.scan_results:
             st.success(f"{added_count} 銘柄追加しました。"); st.rerun()
 
         for _, row in df_res.iterrows():
-            # 見出しに「距離」を表示
-            label = f"{row['判定']} | {row['和名']} ({row['コード']}) 🟢 {row['距離']}"
+            # ★ タイトルに「指値・利確1・利確2」をすべて表示
+            label = f"{row['判定']} | {row['和名']} ({row['コード']}) 🟢 {row['距離']} | 🎯1:{row['利確1']}円 / 🎯2:{row['利確2']}円"
             with st.expander(label):
                 fig = go.Figure()
                 fig.add_trace(go.Candlestick(x=row['df'].index, open=row['df']['Open'], high=row['df']['High'], low=row['df']['Low'], close=row['df']['Close'], name='価格'))
                 fig.add_trace(go.Scatter(x=row['df'].index, y=row['df']['MA20'], line=dict(color='green', width=1), name='20MA'))
                 fig.add_trace(go.Scatter(x=row['df'].index, y=row['df']['MA60'], line=dict(color='orange', width=1), name='60MA'))
                 
-                if row['is_buy']:
-                    fig.add_hline(y=row['精密底'], line_dash="dash", line_color="royalblue", annotation_text="指値")
-                    fig.add_hline(y=row['目標1'], line_dash="dash", line_color="green", annotation_text="利確1")
-                    fig.add_hline(y=row['目標2'], line_dash="dash", line_color="red", annotation_text="利確2")
-                else:
-                    fig.add_hline(y=row['精密天井'], line_dash="dash", line_color="orange", annotation_text="戻り")
-                    fig.add_hline(y=row['目標1'], line_dash="dash", line_color="green", annotation_text="利確1")
-                    fig.add_hline(y=row['目標2'], line_dash="dash", line_color="royalblue", annotation_text="利確2")
+                fig.add_hline(y=row['指値(入口)'], line_dash="dash", line_color="royalblue", annotation_text="指値")
+                fig.add_hline(y=row['利確1'], line_dash="dash", line_color="green", annotation_text="利確1")
+                fig.add_hline(y=row['利確2'], line_dash="dash", line_color="red", annotation_text="利確2")
                 
                 fig.update_layout(height=450, margin=dict(l=0, r=0, b=0, t=0), showlegend=False, xaxis_rangeslider_visible=False, yaxis=dict(fixedrange=True), xaxis=dict(fixedrange=True))
                 st.plotly_chart(fig, use_container_width=True, config={'staticPlot': True})
                 
                 c_inf, c_btn = st.columns([2, 1])
                 with c_inf:
-                    st.write(f"**現在値:** {row['現在値']}円 | **指値まで:** {row['距離']}")
+                    st.write(f"**現在:** {row['現在値']}円 | **指値:** {row['指値(入口)']}円")
+                    st.write(f"**利確1:** {row['利確1']}円 | **利確2:** {row['利確2']}円")
                 with c_btn:
                     if st.button(f"⭐ 保存", key=f"add_{s_type}_{row['コード']}"):
                         if add_bulk_to_list([row['コード']]): st.success("保存完了"); st.rerun()
-
+        st.divider()
+        # ★ 下の表にも「指値・利確1・利確2」を数値で表示
+        st.dataframe(df_res.drop(columns=['df', 'is_buy']), use_container_width=True)
