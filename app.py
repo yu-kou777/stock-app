@@ -1,6 +1,5 @@
 import yfinance as yf
 import pandas as pd
-import pandas_ta as ta
 import streamlit as st
 import plotly.graph_objects as go
 import os
@@ -37,6 +36,16 @@ def save_list(text):
     with open(SAVE_FILE, "w", encoding="utf-8") as f:
         f.write(cleaned_text)
 
+# ★追加：RSIの自作計算関数（pandas-taの代わり）
+def calculate_rsi(series, period=14):
+    delta = series.diff()
+    up = delta.clip(lower=0)
+    down = -1 * delta.clip(upper=0)
+    ema_up = up.ewm(com=period-1, adjust=False).mean()
+    ema_down = down.ewm(com=period-1, adjust=False).mean()
+    rs = ema_up / ema_down
+    return 100 - (100 / (1 + rs))
+
 # RCI（順位相関指数）の計算関数
 def calculate_rci(series, period=9):
     def rci_logic(s):
@@ -60,8 +69,8 @@ def analyze_stock(ticker, min_p, max_p, rsi_range, rci_range, is_force=False):
         # テクニカル指標の計算
         df['MA20'] = df['Close'].rolling(20).mean()
         df['MA60'] = df['Close'].rolling(60).mean()
-        df['RSI'] = ta.rsi(df['Close'], length=14)
-        df['RCI'] = calculate_rci(df['Close'], period=9) # 9日RCI
+        df['RSI'] = calculate_rsi(df['Close'], period=14)  # ★修正：自作関数を使用
+        df['RCI'] = calculate_rci(df['Close'], period=9)
         
         curr_rsi = df['RSI'].iloc[-1]
         curr_rci = df['RCI'].iloc[-1]
@@ -149,3 +158,4 @@ if st.button("🛰️ スキャン開始"):
                 st.write(f"現在値: {row['現在値']}円 / **指値目安: {row['指値']}円**")
     else:
         st.info("条件に合う銘柄は見つかりませんでした。フィルタ設定を見直してください。")
+
