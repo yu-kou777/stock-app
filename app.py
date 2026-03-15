@@ -3,6 +3,8 @@ import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 import os
+import requests
+from io import BytesIO
 
 # --- 1. アプリ基本設定 ---
 st.set_page_config(layout="wide", page_title="Stock Sniper Pro", page_icon="🦅")
@@ -14,12 +16,19 @@ SAVE_FILE = "watchlist.txt"
 def get_jpx_master():
     url = "https://www.jpx.co.jp/markets/statistics-fra/data/files/p_stock_data.xlsx"
     try:
-        df = pd.read_excel(url)
+        # 普通のブラウザからのアクセスに見せかけてJPXのブロックを回避
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+        res = requests.get(url, headers=headers)
+        res.raise_for_status()
+        
+        # メモリ上でExcelとして読み込む
+        df = pd.read_excel(BytesIO(res.content))
         prime = df[df['市場・商品区分'].str.contains('プライム', na=False)]['コード'].astype(str).tolist()
         standard = df[df['市場・商品区分'].str.contains('スタンダード', na=False)]['コード'].astype(str).tolist()
         names = dict(zip(df['コード'].astype(str), df['銘柄名']))
         return {"prime": prime, "standard": standard, "names": names}
-    except:
+    except Exception as e:
+        st.error(f"銘柄リストの取得に失敗しました: {e}")
         return {"prime": [], "standard": [], "names": {}}
 
 jpx = get_jpx_master()
@@ -36,7 +45,7 @@ def save_list(text):
     with open(SAVE_FILE, "w", encoding="utf-8") as f:
         f.write(cleaned_text)
 
-# ★追加：RSIの自作計算関数（pandas-taの代わり）
+# --- テクニカル指標の自作計算関数（エラー回避のため） ---
 def calculate_rsi(series, period=14):
     delta = series.diff()
     up = delta.clip(lower=0)
@@ -46,7 +55,6 @@ def calculate_rsi(series, period=14):
     rs = ema_up / ema_down
     return 100 - (100 / (1 + rs))
 
-# RCI（順位相関指数）の計算関数
 def calculate_rci(series, period=9):
     def rci_logic(s):
         n = len(s)
@@ -66,10 +74,10 @@ def analyze_stock(ticker, min_p, max_p, rsi_range, rci_range, is_force=False):
         price = df.iloc[-1]['Close']
         if not is_force and not (min_p <= price <= max_p): return None
 
-        # テクニカル指標の計算
+        # テクニカル指標の計算（自作関数を使用）
         df['MA20'] = df['Close'].rolling(20).mean()
         df['MA60'] = df['Close'].rolling(60).mean()
-        df['RSI'] = calculate_rsi(df['Close'], period=14)  # ★修正：自作関数を使用
+        df['RSI'] = calculate_rsi(df['Close'], period=14)
         df['RCI'] = calculate_rci(df['Close'], period=9)
         
         curr_rsi = df['RSI'].iloc[-1]
@@ -112,7 +120,7 @@ saved_text = load_saved_list()
 is_force = False
 
 if mode == "⭐ 保存リスト":
-    input_area = st.sidebar.text_area("ウォッチリスト (カンマ区切り)", saved_text, height=150)
+    input_area = st.sidebar.text_area("ウォッチリスト (カンマ区切りで入力)", saved_text, height=150)
     c_s, c_c = st.sidebar.columns(2)
     if c_s.button("💾 保存"): save_list(input_area); st.rerun()
     if c_c.button("🗑️ 全消去"): save_list(""); st.rerun()
@@ -131,31 +139,33 @@ rci_range = st.sidebar.slider("RCI範囲", -100, 100, (-100, -50))
 
 # 実行ボタン
 if st.button("🛰️ スキャン開始"):
-    results = []
-    bar = st.progress(0)
-    MAX_DISPLAY = 50 # サーバー負荷対策
-    
-    for i, t in enumerate(targets):
-        res = analyze_stock(t, min_p, max_p, rsi_range, rci_range, is_force)
-        if res:
-            results.append(res)
-            # 保存リストの時は制限なし、市場スキャンの時はMAXで止める
-            if not is_force and len(results) >= MAX_DISPLAY:
-                st.warning(f"⚠️ ヒット数が多いため、上位{MAX_DISPLAY}件で停止しました。")
-                break
-        bar.progress((i + 1) / len(targets))
-
-    if results:
-        df_res = pd.DataFrame(results).sort_values("スコア", ascending=False)
-        st.success(f"🎯 検索が完了しました（{len(results)} 件）")
-        
-        for _, row in df_res.iterrows():
-            with st.expander(f"{row['判定']} | {row['和名']} ({row['コード']}) RSI:{row['RSI']} / RCI:{row['RCI']}"):
-                fig = go.Figure(data=[go.Candlestick(x=row['df'].index, open=row['df']['Open'], high=row['df']['High'], low=row['df']['Low'], close=row['df']['Close'], name='価格')])
-                fig.add_hline(y=row['指値'], line_dash="dash", line_color="royalblue", annotation_text="指値")
-                fig.update_layout(height=400, margin=dict(l=0, r=0, b=0, t=0), xaxis_rangeslider_visible=False, showlegend=False)
-                st.plotly_chart(fig, use_container_width=True)
-                st.write(f"現在値: {row['現在値']}円 / **指値目安: {row['指値']}円**")
+    if not targets:
+        st.warning("⚠️ 検索対象の銘柄がありません。市場データが取得できていない可能性があります。")
     else:
-        st.info("条件に合う銘柄は見つかりませんでした。フィルタ設定を見直してください。")
+        results = []
+        bar = st.progress(0)
+        MAX_DISPLAY = 50 # サーバー負荷対策
+        
+        for i, t in enumerate(targets):
+            res = analyze_stock(t, min_p, max_p, rsi_range, rci_range, is_force)
+            if res:
+                results.append(res)
+                # 保存リストの時は制限なし、市場スキャンの時はMAXで止める
+                if not is_force and len(results) >= MAX_DISPLAY:
+                    st.warning(f"⚠️ ヒット数が多いため、上位{MAX_DISPLAY}件で停止しました。")
+                    break
+            bar.progress((i + 1) / len(targets))
 
+        if results:
+            df_res = pd.DataFrame(results).sort_values("スコア", ascending=False)
+            st.success(f"🎯 検索が完了しました（{len(results)} 件）")
+            
+            for _, row in df_res.iterrows():
+                with st.expander(f"{row['判定']} | {row['和名']} ({row['コード']}) RSI:{row['RSI']} / RCI:{row['RCI']}"):
+                    fig = go.Figure(data=[go.Candlestick(x=row['df'].index, open=row['df']['Open'], high=row['df']['High'], low=row['df']['Low'], close=row['df']['Close'], name='価格')])
+                    fig.add_hline(y=row['指値'], line_dash="dash", line_color="royalblue", annotation_text="指値")
+                    fig.update_layout(height=400, margin=dict(l=0, r=0, b=0, t=0), xaxis_rangeslider_visible=False, showlegend=False)
+                    st.plotly_chart(fig, use_container_width=True)
+                    st.write(f"現在値: {row['現在値']}円 / **指値目安: {row['指値']}円**")
+        else:
+            st.info("条件に合う銘柄は見つかりませんでした。フィルタ設定を見直してください。")
