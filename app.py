@@ -14,15 +14,16 @@ SAVE_FILE = "watchlist.txt"
 
 @st.cache_data(ttl=86400) # 1日キャッシュして高速化
 def get_jpx_master():
-    url = "https://www.jpx.co.jp/markets/statistics-fra/data/files/p_stock_data.xlsx"
+    # ★修正：本物のJPX公式リストURL（古いExcel形式 .xls）
+    url = "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xls"
     try:
         # 普通のブラウザからのアクセスに見せかけてJPXのブロックを回避
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
         res = requests.get(url, headers=headers)
         res.raise_for_status()
         
-        # メモリ上でExcelとして読み込む
-        df = pd.read_excel(BytesIO(res.content))
+        # xlrdを使って .xls 形式を読み込む
+        df = pd.read_excel(BytesIO(res.content), engine='xlrd')
         prime = df[df['市場・商品区分'].str.contains('プライム', na=False)]['コード'].astype(str).tolist()
         standard = df[df['市場・商品区分'].str.contains('スタンダード', na=False)]['コード'].astype(str).tolist()
         names = dict(zip(df['コード'].astype(str), df['銘柄名']))
