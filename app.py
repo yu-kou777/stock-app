@@ -25,6 +25,18 @@ def get_jpx_master():
 
 jpx = get_jpx_master()
 
+def load_saved_list():
+    if os.path.exists(SAVE_FILE):
+        with open(SAVE_FILE, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    return ""
+
+def save_list(text):
+    items = [i.strip() for i in text.replace('\n', ',').split(',') if i.strip()]
+    cleaned_text = ", ".join(sorted(set(items), key=items.index))
+    with open(SAVE_FILE, "w", encoding="utf-8") as f:
+        f.write(cleaned_text)
+
 # RCI（順位相関指数）の計算関数
 def calculate_rci(series, period=9):
     def rci_logic(s):
@@ -54,9 +66,10 @@ def analyze_stock(ticker, min_p, max_p, rsi_range, rci_range, is_force=False):
         curr_rsi = df['RSI'].iloc[-1]
         curr_rci = df['RCI'].iloc[-1]
 
-        # RSIとRCIの範囲チェック
-        if not (rsi_range[0] <= curr_rsi <= rsi_range[1]): return None
-        if not (rci_range[0] <= curr_rci <= rci_range[1]): return None
+        # RSIとRCIの範囲チェック (強制検索の時は無視)
+        if not is_force:
+            if not (rsi_range[0] <= curr_rsi <= rsi_range[1]): return None
+            if not (rci_range[0] <= curr_rci <= rci_range[1]): return None
 
         # スコアリング
         low_60 = df['Low'].tail(60).min()
@@ -84,39 +97,55 @@ st.title("🏹 Stock Sniper Pro: RSI & RCI Edition")
 # サイドバー設定
 st.sidebar.title("💰 検索・フィルタ")
 mode = st.sidebar.radio("対象市場", ["📊 プライム", "🏛️ スタンダード", "⭐ 保存リスト"])
+
+# 保存リストモードの時の入力欄
+saved_text = load_saved_list()
+is_force = False
+
+if mode == "⭐ 保存リスト":
+    input_area = st.sidebar.text_area("ウォッチリスト (カンマ区切り)", saved_text, height=150)
+    c_s, c_c = st.sidebar.columns(2)
+    if c_s.button("💾 保存"): save_list(input_area); st.rerun()
+    if c_c.button("🗑️ 全消去"): save_list(""); st.rerun()
+    targets = [f"{t.strip()}.T" if t.strip().isdigit() else t.strip() for t in input_area.split(',') if t.strip()]
+    is_force = True # リスト指定の時はフィルタを無視して強制表示
+else:
+    targets = [f"{c}.T" for c in (jpx["prime"] if mode=="📊 プライム" else jpx["standard"])]
+
+st.sidebar.divider()
 min_p = st.sidebar.number_input("株価下限", 0, 100000, 500)
 max_p = st.sidebar.number_input("株価上限", 0, 100000, 5000)
 
 st.sidebar.subheader("📈 指標フィルタ")
-rsi_range = st.sidebar.slider("RSI範囲", 0, 100, (0, 40)) # デフォルトで売られすぎ狙い
+rsi_range = st.sidebar.slider("RSI範囲", 0, 100, (0, 40)) 
 rci_range = st.sidebar.slider("RCI範囲", -100, 100, (-100, -50))
 
 # 実行ボタン
-if st.button("🛰️ 全力スキャン開始"):
-    targets = [f"{c}.T" for c in (jpx["prime"] if mode=="📊 プライム" else jpx["standard"])]
+if st.button("🛰️ スキャン開始"):
     results = []
     bar = st.progress(0)
     MAX_DISPLAY = 50 # サーバー負荷対策
     
     for i, t in enumerate(targets):
-        res = analyze_stock(t, min_p, max_p, rsi_range, rci_range)
+        res = analyze_stock(t, min_p, max_p, rsi_range, rci_range, is_force)
         if res:
             results.append(res)
-            if len(results) >= MAX_DISPLAY:
+            # 保存リストの時は制限なし、市場スキャンの時はMAXで止める
+            if not is_force and len(results) >= MAX_DISPLAY:
                 st.warning(f"⚠️ ヒット数が多いため、上位{MAX_DISPLAY}件で停止しました。")
                 break
         bar.progress((i + 1) / len(targets))
 
     if results:
         df_res = pd.DataFrame(results).sort_values("スコア", ascending=False)
-        st.success(f"🎯 条件に合致する銘柄が {len(results)} 件見つかりました。")
+        st.success(f"🎯 検索が完了しました（{len(results)} 件）")
         
         for _, row in df_res.iterrows():
             with st.expander(f"{row['判定']} | {row['和名']} ({row['コード']}) RSI:{row['RSI']} / RCI:{row['RCI']}"):
-                fig = go.Figure(data=[go.Candlestick(x=row['df'].index, open=row['df']['Open'], high=row['df']['High'], low=row['df']['Low'], close=row['df']['Close'])])
+                fig = go.Figure(data=[go.Candlestick(x=row['df'].index, open=row['df']['Open'], high=row['df']['High'], low=row['df']['Low'], close=row['df']['Close'], name='価格')])
                 fig.add_hline(y=row['指値'], line_dash="dash", line_color="royalblue", annotation_text="指値")
-                fig.update_layout(height=400, margin=dict(l=0, r=0, b=0, t=0), xaxis_rangeslider_visible=False)
+                fig.update_layout(height=400, margin=dict(l=0, r=0, b=0, t=0), xaxis_rangeslider_visible=False, showlegend=False)
                 st.plotly_chart(fig, use_container_width=True)
                 st.write(f"現在値: {row['現在値']}円 / **指値目安: {row['指値']}円**")
     else:
-        st.info("条件に合う銘柄は見つかりませんでした。フィルタを広げてください。")
+        st.info("条件に合う銘柄は見つかりませんでした。フィルタ設定を見直してください。")
