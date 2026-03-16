@@ -5,7 +5,7 @@ import plotly.graph_objects as go
 import os
 import requests
 from io import BytesIO
-import concurrent.futures # ★爆速化のための追加部品（標準搭載）
+import concurrent.futures
 
 # --- 1. アプリ基本設定 ---
 st.set_page_config(layout="wide", page_title="Stock Sniper Pro", page_icon="🦅")
@@ -13,7 +13,7 @@ st.set_page_config(layout="wide", page_title="Stock Sniper Pro", page_icon="🦅
 # --- 2. データベース & JPX全銘柄名簿の自動取得 ---
 SAVE_FILE = "watchlist.txt"
 
-@st.cache_data(ttl=86400) # 1日キャッシュして高速化
+@st.cache_data(ttl=86400)
 def get_jpx_master():
     url = "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xls"
     try:
@@ -64,27 +64,37 @@ def calculate_rci(series, period=9):
     return series.rolling(window=period).apply(rci_logic)
 
 # --- 3. 解析エンジン ---
-def analyze_stock(ticker, min_p, max_p, rsi_range, rci_range, is_force=False):
+def analyze_stock(ticker, min_p, max_p, rsi_range, rci_range, ma60_filter, ma200_filter, is_force=False):
     try:
         tkr = yf.Ticker(ticker)
-        # ★爆速化ポイント：actions=False で不要な配当データを省き通信を軽量化
-        df = tkr.history(period="6mo", interval="1d", actions=False)
-        if df.empty or len(df) < 60: return None
+        # MA200を計算するため、データ取得期間を「1年」に延長
+        df = tkr.history(period="1y", interval="1d", actions=False)
+        if df.empty or len(df) < 200: return None
         
         price = df.iloc[-1]['Close']
         if not is_force and not (min_p <= price <= max_p): return None
 
         df['MA20'] = df['Close'].rolling(20).mean()
         df['MA60'] = df['Close'].rolling(60).mean()
+        df['MA200'] = df['Close'].rolling(200).mean() # 追加：200日移動平均線
         df['RSI'] = calculate_rsi(df['Close'], period=14)
         df['RCI'] = calculate_rci(df['Close'], period=9)
         
         curr_rsi = df['RSI'].iloc[-1]
         curr_rci = df['RCI'].iloc[-1]
+        curr_ma60 = df['MA60'].iloc[-1]
+        curr_ma200 = df['MA200'].iloc[-1]
 
+        # フィルタリング機能
         if not is_force:
             if not (rsi_range[0] <= curr_rsi <= rsi_range[1]): return None
             if not (rci_range[0] <= curr_rci <= rci_range[1]): return None
+            
+            # オンオフボタンの条件（MAの上下5%以内を「付近」と定義）
+            if ma60_filter:
+                if pd.isna(curr_ma60) or not (0.95 <= price / curr_ma60 <= 1.05): return None
+            if ma200_filter:
+                if pd.isna(curr_ma200) or not (0.95 <= price / curr_ma200 <= 1.05): return None
 
         low_60 = df['Low'].tail(60).min()
         std20 = df['Close'].rolling(20).std().iloc[-1]
@@ -108,6 +118,21 @@ def analyze_stock(ticker, min_p, max_p, rsi_range, rci_range, is_force=False):
 # --- 4. 画面構築 ---
 st.title("🏹 Stock Sniper Pro: RSI & RCI Edition")
 
+# 📖 評価図柄（アイコン）と機能の説明
+with st.expander("📖 評価図柄（アイコン）と機能の説明を見る", expanded=False):
+    st.markdown("""
+    ### 🎯 判定アイコンの意味
+    * **🚀 超精密買 (スコア50以上)**: RSI・RCIが共に底値圏にあり、直近安値に接近している「最強の反発チャンス」銘柄です。
+    * **✨ 買目線 (スコア20以上)**: 売られすぎ水準に入り始めており、エントリーの準備・監視をしても良い銘柄です。
+    * **☁️ 様子見 (スコア20未満)**: 現在は明確な反発シグナルが出ていない、または下落の途中の銘柄です。
+
+    ### 📈 MA（移動平均線）反発フィルタ
+    サイドバーのスイッチをオンにすると、以下の条件に合致する銘柄のみを抽出します。
+    * **🟢 MA60付近**: 株価が「60日移動平均線」の上下5%以内に接近している銘柄。中期的な反発ラインとして強く意識されます。
+    * **🔴 MA200付近**: 株価が「200日移動平均線」の上下5%以内に接近している銘柄。長期的な大底や、絶好の押し目買いチャンスになります。
+    """)
+
+# サイドバー設定
 st.sidebar.title("💰 検索・フィルタ")
 mode = st.sidebar.radio("対象市場", ["📊 プライム", "🏛️ スタンダード", "⭐ 保存リスト"])
 
@@ -115,7 +140,7 @@ saved_text = load_saved_list()
 is_force = False
 
 if mode == "⭐ 保存リスト":
-    input_area = st.sidebar.text_area("ウォッチリスト (カンマ区切りで入力)", saved_text, height=150)
+    input_area = st.sidebar.text_area("ウォッチリスト (カンマ区切り)", saved_text, height=150)
     c_s, c_c = st.sidebar.columns(2)
     if c_s.button("💾 保存"): save_list(input_area); st.rerun()
     if c_c.button("🗑️ 全消去"): save_list(""); st.rerun()
@@ -123,6 +148,12 @@ if mode == "⭐ 保存リスト":
     is_force = True
 else:
     targets = [f"{c}.T" for c in (jpx["prime"] if mode=="📊 プライム" else jpx["standard"])]
+
+st.sidebar.divider()
+st.sidebar.subheader("🎯 反発ライン絞り込み")
+# ★追加：MA60とMA200のオンオフスイッチ（トグル）
+ma60_filter = st.sidebar.toggle("🟢 MA60(60日線)付近の銘柄", value=False)
+ma200_filter = st.sidebar.toggle("🔴 MA200(200日線)付近の銘柄", value=False)
 
 st.sidebar.divider()
 min_p = st.sidebar.number_input("株価下限", 0, 100000, 500)
@@ -135,29 +166,26 @@ rci_range = st.sidebar.slider("RCI範囲", -100, 100, (-100, -50))
 # 実行ボタン
 if st.button("🛰️ スキャン開始"):
     if not targets:
-        st.warning("⚠️ 検索対象の銘柄がありません。市場データが取得できていない可能性があります。")
+        st.warning("⚠️ 検索対象の銘柄がありません。")
     else:
         results = []
         bar = st.progress(0)
         MAX_DISPLAY = 50
         
-        # ★爆速化ポイント：10件同時に並行スキャン（Yahooから蹴られない安全圏内）
+        # 並列処理で爆速スキャン
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-            future_to_ticker = {executor.submit(analyze_stock, t, min_p, max_p, rsi_range, rci_range, is_force): t for t in targets}
+            future_to_ticker = {executor.submit(analyze_stock, t, min_p, max_p, rsi_range, rci_range, ma60_filter, ma200_filter, is_force): t for t in targets}
             
             for i, future in enumerate(concurrent.futures.as_completed(future_to_ticker)):
                 res = future.result()
                 if res:
                     results.append(res)
-                    # 目標件数に達したら、裏で動いている残りの通信を強制キャンセルして即座に結果を出す
                     if not is_force and len(results) >= MAX_DISPLAY:
                         st.warning(f"⚠️ ヒット数が多いため、上位{MAX_DISPLAY}件で停止しました。")
                         executor.shutdown(wait=False, cancel_futures=True)
                         break
                 
-                # プログレスバーの更新
-                progress_val = min((i + 1) / len(targets), 1.0)
-                bar.progress(progress_val)
+                bar.progress(min((i + 1) / len(targets), 1.0))
 
         if results:
             df_res = pd.DataFrame(results).sort_values("スコア", ascending=False)
@@ -166,9 +194,16 @@ if st.button("🛰️ スキャン開始"):
             for _, row in df_res.iterrows():
                 with st.expander(f"{row['判定']} | {row['和名']} ({row['コード']}) RSI:{row['RSI']} / RCI:{row['RCI']}"):
                     fig = go.Figure(data=[go.Candlestick(x=row['df'].index, open=row['df']['Open'], high=row['df']['High'], low=row['df']['Low'], close=row['df']['Close'], name='価格')])
+                    
+                    # ★追加：移動平均線をチャートに表示
+                    fig.add_trace(go.Scatter(x=row['df'].index, y=row['df']['MA20'], line=dict(color='green', width=1), name='20MA(緑)'))
+                    fig.add_trace(go.Scatter(x=row['df'].index, y=row['df']['MA60'], line=dict(color='orange', width=1), name='60MA(橙)'))
+                    fig.add_trace(go.Scatter(x=row['df'].index, y=row['df']['MA200'], line=dict(color='purple', width=1.5), name='200MA(紫)'))
+
                     fig.add_hline(y=row['指値'], line_dash="dash", line_color="royalblue", annotation_text="指値")
-                    fig.update_layout(height=400, margin=dict(l=0, r=0, b=0, t=0), xaxis_rangeslider_visible=False, showlegend=False)
+                    fig.update_layout(height=400, margin=dict(l=0, r=0, b=0, t=0), xaxis_rangeslider_visible=False, showlegend=True)
                     st.plotly_chart(fig, use_container_width=True)
                     st.write(f"現在値: {row['現在値']}円 / **指値目安: {row['指値']}円**")
         else:
             st.info("条件に合う銘柄は見つかりませんでした。フィルタ設定を見直してください。")
+
