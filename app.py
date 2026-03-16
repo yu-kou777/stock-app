@@ -64,22 +64,30 @@ def calculate_rci(series, period=9):
     return series.rolling(window=period).apply(rci_logic)
 
 # --- 3. 解析エンジン ---
-def analyze_stock(ticker, min_p, max_p, rsi_range, rci_range, ma60_filter, ma200_filter, is_force=False):
+def analyze_stock(ticker, min_p, max_p, rsi_range, rci_range, ma60_filter, ma200_filter, min_volume, is_force=False):
     try:
         tkr = yf.Ticker(ticker)
-        # MA200を計算するため、データ取得期間を「1年」に延長
         df = tkr.history(period="1y", interval="1d", actions=False)
         if df.empty or len(df) < 200: return None
         
         price = df.iloc[-1]['Close']
         if not is_force and not (min_p <= price <= max_p): return None
 
+        # ★追加：出来高（Volume）の直近5日平均を計算
+        avg_volume = df['Volume'].tail(5).mean()
+        if not is_force and avg_volume < min_volume: return None
+
+        # 移動平均とオシレーター
         df['MA20'] = df['Close'].rolling(20).mean()
         df['MA60'] = df['Close'].rolling(60).mean()
-        df['MA200'] = df['Close'].rolling(200).mean() # 追加：200日移動平均線
+        df['MA200'] = df['Close'].rolling(200).mean()
         df['RSI'] = calculate_rsi(df['Close'], period=14)
         df['RCI'] = calculate_rci(df['Close'], period=9)
         
+        # ★追加：日足VWAP（20日ローリングVWAP）
+        typical_price = (df['High'] + df['Low'] + df['Close']) / 3
+        df['VWAP'] = (typical_price * df['Volume']).rolling(20).sum() / df['Volume'].rolling(20).sum()
+
         curr_rsi = df['RSI'].iloc[-1]
         curr_rci = df['RCI'].iloc[-1]
         curr_ma60 = df['MA60'].iloc[-1]
@@ -90,7 +98,6 @@ def analyze_stock(ticker, min_p, max_p, rsi_range, rci_range, ma60_filter, ma200
             if not (rsi_range[0] <= curr_rsi <= rsi_range[1]): return None
             if not (rci_range[0] <= curr_rci <= rci_range[1]): return None
             
-            # オンオフボタンの条件（MAの上下5%以内を「付近」と定義）
             if ma60_filter:
                 if pd.isna(curr_ma60) or not (0.95 <= price / curr_ma60 <= 1.05): return None
             if ma200_filter:
@@ -111,6 +118,7 @@ def analyze_stock(ticker, min_p, max_p, rsi_range, rci_range, ma60_filter, ma200
             "コード": code_only, "和名": jpx["names"].get(code_only, "不明"),
             "現在値": int(price), "判定": judge, "スコア": int(score), 
             "RSI": round(curr_rsi, 1), "RCI": round(curr_rci, 1),
+            "出来高": int(avg_volume),
             "指値": p_floor, "df": df
         }
     except: return None
@@ -118,7 +126,6 @@ def analyze_stock(ticker, min_p, max_p, rsi_range, rci_range, ma60_filter, ma200
 # --- 4. 画面構築 ---
 st.title("🏹 Stock Sniper Pro: RSI & RCI Edition")
 
-# 📖 評価図柄（アイコン）と機能の説明
 with st.expander("📖 評価図柄（アイコン）と機能の説明を見る", expanded=False):
     st.markdown("""
     ### 🎯 判定アイコンの意味
@@ -126,13 +133,15 @@ with st.expander("📖 評価図柄（アイコン）と機能の説明を見る
     * **✨ 買目線 (スコア20以上)**: 売られすぎ水準に入り始めており、エントリーの準備・監視をしても良い銘柄です。
     * **☁️ 様子見 (スコア20未満)**: 現在は明確な反発シグナルが出ていない、または下落の途中の銘柄です。
 
-    ### 📈 MA（移動平均線）反発フィルタ
-    サイドバーのスイッチをオンにすると、以下の条件に合致する銘柄のみを抽出します。
-    * **🟢 MA60付近**: 株価が「60日移動平均線」の上下5%以内に接近している銘柄。中期的な反発ラインとして強く意識されます。
-    * **🔴 MA200付近**: 株価が「200日移動平均線」の上下5%以内に接近している銘柄。長期的な大底や、絶好の押し目買いチャンスになります。
+    ### 📈 チャートの線の意味
+    * **🟢 緑線(MA20)** / **🟠 橙線(MA60)** / **🟣 紫線(MA200)**: 各期間の移動平均線です。
+    * **💠 水色点線(VWAP)**: 出来高を加味した本当の平均取得単価（20日間）です。株価がこの線より上なら買い優勢、下なら売り優勢と判断できます。
+
+    ### 🛡️ フィルタ機能
+    * **MA反発フィルタ**: 株価がMA60やMA200の「上下5%以内」に接近している銘柄のみを狙い撃ちします。
+    * **出来高フィルタ**: 直近5日間の平均出来高が設定値未満の「売買が過疎っている銘柄」を排除し、安全に取引できる銘柄だけを残します。
     """)
 
-# サイドバー設定
 st.sidebar.title("💰 検索・フィルタ")
 mode = st.sidebar.radio("対象市場", ["📊 プライム", "🏛️ スタンダード", "⭐ 保存リスト"])
 
@@ -150,15 +159,18 @@ else:
     targets = [f"{c}.T" for c in (jpx["prime"] if mode=="📊 プライム" else jpx["standard"])]
 
 st.sidebar.divider()
-st.sidebar.subheader("🎯 反発ライン絞り込み")
-# ★追加：MA60とMA200のオンオフスイッチ（トグル）
-ma60_filter = st.sidebar.toggle("🟢 MA60(60日線)付近の銘柄", value=False)
-ma200_filter = st.sidebar.toggle("🔴 MA200(200日線)付近の銘柄", value=False)
+st.sidebar.subheader("🎯 ライン接近絞り込み")
+ma60_filter = st.sidebar.toggle("🟠 MA60(60日線)付近の銘柄", value=False)
+ma200_filter = st.sidebar.toggle("🟣 MA200(200日線)付近の銘柄", value=False)
 
 st.sidebar.divider()
+st.sidebar.subheader("📊 出来高・価格フィルタ")
+# ★追加：最低出来高の入力（デフォルト10万株）
+min_volume = st.sidebar.number_input("最低出来高 (直近5日平均)", 0, 100000000, 100000, step=50000)
 min_p = st.sidebar.number_input("株価下限", 0, 100000, 500)
 max_p = st.sidebar.number_input("株価上限", 0, 100000, 5000)
 
+st.sidebar.divider()
 st.sidebar.subheader("📈 指標フィルタ")
 rsi_range = st.sidebar.slider("RSI範囲", 0, 100, (0, 40)) 
 rci_range = st.sidebar.slider("RCI範囲", -100, 100, (-100, -50))
@@ -172,9 +184,8 @@ if st.button("🛰️ スキャン開始"):
         bar = st.progress(0)
         MAX_DISPLAY = 50
         
-        # 並列処理で爆速スキャン
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-            future_to_ticker = {executor.submit(analyze_stock, t, min_p, max_p, rsi_range, rci_range, ma60_filter, ma200_filter, is_force): t for t in targets}
+            future_to_ticker = {executor.submit(analyze_stock, t, min_p, max_p, rsi_range, rci_range, ma60_filter, ma200_filter, min_volume, is_force): t for t in targets}
             
             for i, future in enumerate(concurrent.futures.as_completed(future_to_ticker)):
                 res = future.result()
@@ -192,18 +203,21 @@ if st.button("🛰️ スキャン開始"):
             st.success(f"🎯 検索が完了しました（{len(results)} 件）")
             
             for _, row in df_res.iterrows():
-                with st.expander(f"{row['判定']} | {row['和名']} ({row['コード']}) RSI:{row['RSI']} / RCI:{row['RCI']}"):
+                # 出来高の数値をカンマ区切りで表示して見やすくする
+                vol_str = f"{row['出来高']:,}"
+                with st.expander(f"{row['判定']} | {row['和名']} ({row['コード']}) RSI:{row['RSI']} / RCI:{row['RCI']} / 出来高:{vol_str}株"):
                     fig = go.Figure(data=[go.Candlestick(x=row['df'].index, open=row['df']['Open'], high=row['df']['High'], low=row['df']['Low'], close=row['df']['Close'], name='価格')])
                     
-                    # ★追加：移動平均線をチャートに表示
                     fig.add_trace(go.Scatter(x=row['df'].index, y=row['df']['MA20'], line=dict(color='green', width=1), name='20MA(緑)'))
                     fig.add_trace(go.Scatter(x=row['df'].index, y=row['df']['MA60'], line=dict(color='orange', width=1), name='60MA(橙)'))
                     fig.add_trace(go.Scatter(x=row['df'].index, y=row['df']['MA200'], line=dict(color='purple', width=1.5), name='200MA(紫)'))
+                    
+                    # ★追加：VWAP（水色の点線）
+                    fig.add_trace(go.Scatter(x=row['df'].index, y=row['df']['VWAP'], line=dict(color='cyan', width=1.5, dash='dot'), name='VWAP(水色点線)'))
 
                     fig.add_hline(y=row['指値'], line_dash="dash", line_color="royalblue", annotation_text="指値")
                     fig.update_layout(height=400, margin=dict(l=0, r=0, b=0, t=0), xaxis_rangeslider_visible=False, showlegend=True)
                     st.plotly_chart(fig, use_container_width=True)
                     st.write(f"現在値: {row['現在値']}円 / **指値目安: {row['指値']}円**")
         else:
-            st.info("条件に合う銘柄は見つかりませんでした。フィルタ設定を見直してください。")
-
+            st.info("条件に合う銘柄は見つかりませんでした。出来高やフィルタ設定を見直してください。")
