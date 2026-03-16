@@ -5,6 +5,7 @@ import plotly.graph_objects as go
 import os
 import requests
 from io import BytesIO
+import concurrent.futures # ★爆速化のための追加部品（標準搭載）
 
 # --- 1. アプリ基本設定 ---
 st.set_page_config(layout="wide", page_title="Stock Sniper Pro", page_icon="🦅")
@@ -14,15 +15,12 @@ SAVE_FILE = "watchlist.txt"
 
 @st.cache_data(ttl=86400) # 1日キャッシュして高速化
 def get_jpx_master():
-    # ★修正：本物のJPX公式リストURL（古いExcel形式 .xls）
     url = "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xls"
     try:
-        # 普通のブラウザからのアクセスに見せかけてJPXのブロックを回避
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
         res = requests.get(url, headers=headers)
         res.raise_for_status()
         
-        # xlrdを使って .xls 形式を読み込む
         df = pd.read_excel(BytesIO(res.content), engine='xlrd')
         prime = df[df['市場・商品区分'].str.contains('プライム', na=False)]['コード'].astype(str).tolist()
         standard = df[df['市場・商品区分'].str.contains('スタンダード', na=False)]['コード'].astype(str).tolist()
@@ -46,7 +44,7 @@ def save_list(text):
     with open(SAVE_FILE, "w", encoding="utf-8") as f:
         f.write(cleaned_text)
 
-# --- テクニカル指標の自作計算関数（エラー回避のため） ---
+# --- テクニカル指標の自作計算関数 ---
 def calculate_rsi(series, period=14):
     delta = series.diff()
     up = delta.clip(lower=0)
@@ -69,13 +67,13 @@ def calculate_rci(series, period=9):
 def analyze_stock(ticker, min_p, max_p, rsi_range, rci_range, is_force=False):
     try:
         tkr = yf.Ticker(ticker)
-        df = tkr.history(period="6mo", interval="1d")
+        # ★爆速化ポイント：actions=False で不要な配当データを省き通信を軽量化
+        df = tkr.history(period="6mo", interval="1d", actions=False)
         if df.empty or len(df) < 60: return None
         
         price = df.iloc[-1]['Close']
         if not is_force and not (min_p <= price <= max_p): return None
 
-        # テクニカル指標の計算（自作関数を使用）
         df['MA20'] = df['Close'].rolling(20).mean()
         df['MA60'] = df['Close'].rolling(60).mean()
         df['RSI'] = calculate_rsi(df['Close'], period=14)
@@ -84,12 +82,10 @@ def analyze_stock(ticker, min_p, max_p, rsi_range, rci_range, is_force=False):
         curr_rsi = df['RSI'].iloc[-1]
         curr_rci = df['RCI'].iloc[-1]
 
-        # RSIとRCIの範囲チェック (強制検索の時は無視)
         if not is_force:
             if not (rsi_range[0] <= curr_rsi <= rsi_range[1]): return None
             if not (rci_range[0] <= curr_rci <= rci_range[1]): return None
 
-        # スコアリング
         low_60 = df['Low'].tail(60).min()
         std20 = df['Close'].rolling(20).std().iloc[-1]
         score = 0
@@ -112,11 +108,9 @@ def analyze_stock(ticker, min_p, max_p, rsi_range, rci_range, is_force=False):
 # --- 4. 画面構築 ---
 st.title("🏹 Stock Sniper Pro: RSI & RCI Edition")
 
-# サイドバー設定
 st.sidebar.title("💰 検索・フィルタ")
 mode = st.sidebar.radio("対象市場", ["📊 プライム", "🏛️ スタンダード", "⭐ 保存リスト"])
 
-# 保存リストモードの時の入力欄
 saved_text = load_saved_list()
 is_force = False
 
@@ -126,7 +120,7 @@ if mode == "⭐ 保存リスト":
     if c_s.button("💾 保存"): save_list(input_area); st.rerun()
     if c_c.button("🗑️ 全消去"): save_list(""); st.rerun()
     targets = [f"{t.strip()}.T" if t.strip().isdigit() else t.strip() for t in input_area.split(',') if t.strip()]
-    is_force = True # リスト指定の時はフィルタを無視して強制表示
+    is_force = True
 else:
     targets = [f"{c}.T" for c in (jpx["prime"] if mode=="📊 プライム" else jpx["standard"])]
 
@@ -145,17 +139,25 @@ if st.button("🛰️ スキャン開始"):
     else:
         results = []
         bar = st.progress(0)
-        MAX_DISPLAY = 50 # サーバー負荷対策
+        MAX_DISPLAY = 50
         
-        for i, t in enumerate(targets):
-            res = analyze_stock(t, min_p, max_p, rsi_range, rci_range, is_force)
-            if res:
-                results.append(res)
-                # 保存リストの時は制限なし、市場スキャンの時はMAXで止める
-                if not is_force and len(results) >= MAX_DISPLAY:
-                    st.warning(f"⚠️ ヒット数が多いため、上位{MAX_DISPLAY}件で停止しました。")
-                    break
-            bar.progress((i + 1) / len(targets))
+        # ★爆速化ポイント：10件同時に並行スキャン（Yahooから蹴られない安全圏内）
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            future_to_ticker = {executor.submit(analyze_stock, t, min_p, max_p, rsi_range, rci_range, is_force): t for t in targets}
+            
+            for i, future in enumerate(concurrent.futures.as_completed(future_to_ticker)):
+                res = future.result()
+                if res:
+                    results.append(res)
+                    # 目標件数に達したら、裏で動いている残りの通信を強制キャンセルして即座に結果を出す
+                    if not is_force and len(results) >= MAX_DISPLAY:
+                        st.warning(f"⚠️ ヒット数が多いため、上位{MAX_DISPLAY}件で停止しました。")
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        break
+                
+                # プログレスバーの更新
+                progress_val = min((i + 1) / len(targets), 1.0)
+                bar.progress(progress_val)
 
         if results:
             df_res = pd.DataFrame(results).sort_values("スコア", ascending=False)
