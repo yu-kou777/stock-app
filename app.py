@@ -64,7 +64,7 @@ def calculate_rci(series, period=9):
     return series.rolling(window=period).apply(rci_logic)
 
 # --- 3. 解析エンジン ---
-def analyze_stock(ticker, min_p, max_p, rsi_range, rci_range, ma60_filter, ma200_filter, min_volume, is_force=False):
+def analyze_stock(ticker, min_p, max_p, rsi_range, rci_range, bb3_filter, ma_trend_filter, sudden_move_filter, min_volume, is_force=False):
     try:
         tkr = yf.Ticker(ticker)
         df = tkr.history(period="1y", interval="1d", actions=False)
@@ -73,7 +73,6 @@ def analyze_stock(ticker, min_p, max_p, rsi_range, rci_range, ma60_filter, ma200
         price = df.iloc[-1]['Close']
         if not is_force and not (min_p <= price <= max_p): return None
 
-        # ★追加：出来高（Volume）の直近5日平均を計算
         avg_volume = df['Volume'].tail(5).mean()
         if not is_force and avg_volume < min_volume: return None
 
@@ -84,25 +83,54 @@ def analyze_stock(ticker, min_p, max_p, rsi_range, rci_range, ma60_filter, ma200
         df['RSI'] = calculate_rsi(df['Close'], period=14)
         df['RCI'] = calculate_rci(df['Close'], period=9)
         
-        # ★追加：日足VWAP（20日ローリングVWAP）
+        # ボリンジャーバンド ±3σ の計算
+        df['std20'] = df['Close'].rolling(20).std()
+        df['BB_up3'] = df['MA20'] + 3 * df['std20']
+        df['BB_low3'] = df['MA20'] - 3 * df['std20']
+
         typical_price = (df['High'] + df['Low'] + df['Close']) / 3
         df['VWAP'] = (typical_price * df['Volume']).rolling(20).sum() / df['Volume'].rolling(20).sum()
 
         curr_rsi = df['RSI'].iloc[-1]
         curr_rci = df['RCI'].iloc[-1]
-        curr_ma60 = df['MA60'].iloc[-1]
-        curr_ma200 = df['MA200'].iloc[-1]
 
-        # フィルタリング機能
+        # 🎯 各種強力フィルターの適用
         if not is_force:
+            # RSI/RCI フィルター
             if not (rsi_range[0] <= curr_rsi <= rsi_range[1]): return None
             if not (rci_range[0] <= curr_rci <= rci_range[1]): return None
             
-            if ma60_filter:
-                if pd.isna(curr_ma60) or not (0.95 <= price / curr_ma60 <= 1.05): return None
-            if ma200_filter:
-                if pd.isna(curr_ma200) or not (0.95 <= price / curr_ma200 <= 1.05): return None
+            # ボリンジャーバンド±3σフィルター（±3σの3%以内に接近、または突破）
+            if bb3_filter:
+                bb_up = df['BB_up3'].iloc[-1]
+                bb_low = df['BB_low3'].iloc[-1]
+                if pd.isna(bb_up) or pd.isna(bb_low): return None
+                if not ((price >= bb_up * 0.97) or (price <= bb_low * 1.03)):
+                    return None
 
+            # MA トレンドフィルター（20,60,200が全て上昇 または 全て下降）※直近3日間の傾きで判定
+            if ma_trend_filter:
+                ma20_up = df['MA20'].iloc[-1] > df['MA20'].iloc[-3]
+                ma60_up = df['MA60'].iloc[-1] > df['MA60'].iloc[-3]
+                ma200_up = df['MA200'].iloc[-1] > df['MA200'].iloc[-3]
+                all_up = ma20_up and ma60_up and ma200_up
+
+                ma20_down = df['MA20'].iloc[-1] < df['MA20'].iloc[-3]
+                ma60_down = df['MA60'].iloc[-1] < df['MA60'].iloc[-3]
+                ma200_down = df['MA200'].iloc[-1] < df['MA200'].iloc[-3]
+                all_down = ma20_down and ma60_down and ma200_down
+
+                if not (all_up or all_down):
+                    return None
+            
+            # 急騰・急落フィルター（直近20日の高値から-20%、または安値から+20%）
+            if sudden_move_filter:
+                high20 = df['High'].tail(20).max()
+                low20 = df['Low'].tail(20).min()
+                if not ((price <= high20 * 0.80) or (price >= low20 * 1.20)):
+                    return None
+
+        # スコアリング
         low_60 = df['Low'].tail(60).min()
         std20 = df['Close'].rolling(20).std().iloc[-1]
         score = 0
@@ -124,7 +152,7 @@ def analyze_stock(ticker, min_p, max_p, rsi_range, rci_range, ma60_filter, ma200
     except: return None
 
 # --- 4. 画面構築 ---
-st.title("🏹 Stock Sniper Pro: RSI & RCI Edition")
+st.title("🏹 Stock Sniper Pro: 急落・急騰キャッチ Edition")
 
 with st.expander("📖 評価図柄（アイコン）と機能の説明を見る", expanded=False):
     st.markdown("""
@@ -134,12 +162,14 @@ with st.expander("📖 評価図柄（アイコン）と機能の説明を見る
     * **☁️ 様子見 (スコア20未満)**: 現在は明確な反発シグナルが出ていない、または下落の途中の銘柄です。
 
     ### 📈 チャートの線の意味
-    * **🟢 緑線(MA20)** / **🟠 橙線(MA60)** / **🟣 紫線(MA200)**: 各期間の移動平均線です。
-    * **💠 水色点線(VWAP)**: 出来高を加味した本当の平均取得単価（20日間）です。株価がこの線より上なら買い優勢、下なら売り優勢と判断できます。
+    * **🟢緑/🟠橙/🟣紫線**: それぞれ20日・60日・200日の移動平均線(MA)です。
+    * **💠 水色点線(VWAP)**: 出来高を加味した本当の平均取得単価（20日間）です。
+    * **🎀 ピンク/薄青点線 (BB ±3σ)**: 統計的に「99.7%」の確率でこの線の内側に収まる限界ラインです。ここを突き抜けた場合は、強烈な反発（リバウンド）が期待できます。
 
-    ### 🛡️ フィルタ機能
-    * **MA反発フィルタ**: 株価がMA60やMA200の「上下5%以内」に接近している銘柄のみを狙い撃ちします。
-    * **出来高フィルタ**: 直近5日間の平均出来高が設定値未満の「売買が過疎っている銘柄」を排除し、安全に取引できる銘柄だけを残します。
+    ### 🛡️ フィルター機能
+    * **BB±3σ付近**: 極端に買われすぎ・売られすぎのパニック銘柄を狙い撃ちします。
+    * **MA全上昇/下降**: 3つの移動平均線がすべて同じ方向を向いている「強いトレンド（パーフェクトオーダー）」の銘柄を抽出します。
+    * **急騰/急落**: 直近20日間で「20%以上」の激しい値動きがあった銘柄をあぶり出します。
     """)
 
 st.sidebar.title("💰 検索・フィルタ")
@@ -159,21 +189,23 @@ else:
     targets = [f"{c}.T" for c in (jpx["prime"] if mode=="📊 プライム" else jpx["standard"])]
 
 st.sidebar.divider()
-st.sidebar.subheader("🎯 ライン接近絞り込み")
-ma60_filter = st.sidebar.toggle("🟠 MA60(60日線)付近の銘柄", value=False)
-ma200_filter = st.sidebar.toggle("🟣 MA200(200日線)付近の銘柄", value=False)
+st.sidebar.subheader("🚀 急騰・急落キャッチ機能")
+# ★追加・変更：MA60/200を削除し、強力なトレンド・急落キャッチボタンを設置
+bb3_filter = st.sidebar.toggle("🎀 ボリンジャーバンド ±3σ に接近・突破", value=False)
+ma_trend_filter = st.sidebar.toggle("🌊 MA20,60,200が『全て上昇』または『下降』", value=False)
+sudden_move_filter = st.sidebar.toggle("⚡ 直近20日で20%以上の『急騰』または『急落』", value=False)
 
 st.sidebar.divider()
 st.sidebar.subheader("📊 出来高・価格フィルタ")
-# ★追加：最低出来高の入力（デフォルト10万株）
 min_volume = st.sidebar.number_input("最低出来高 (直近5日平均)", 0, 100000000, 100000, step=50000)
-min_p = st.sidebar.number_input("株価下限", 0, 100000, 500)
-max_p = st.sidebar.number_input("株価上限", 0, 100000, 5000)
+# ★変更：株価のステップ幅を1000円単位に変更
+min_p = st.sidebar.number_input("株価下限", 0, 100000, 1000, step=1000)
+max_p = st.sidebar.number_input("株価上限", 0, 100000, 10000, step=1000)
 
 st.sidebar.divider()
 st.sidebar.subheader("📈 指標フィルタ")
-rsi_range = st.sidebar.slider("RSI範囲", 0, 100, (0, 40)) 
-rci_range = st.sidebar.slider("RCI範囲", -100, 100, (-100, -50))
+rsi_range = st.sidebar.slider("RSI範囲", 0, 100, (0, 100)) # デフォルトは広めに設定
+rci_range = st.sidebar.slider("RCI範囲", -100, 100, (-100, 100))
 
 # 実行ボタン
 if st.button("🛰️ スキャン開始"):
@@ -185,7 +217,7 @@ if st.button("🛰️ スキャン開始"):
         MAX_DISPLAY = 50
         
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-            future_to_ticker = {executor.submit(analyze_stock, t, min_p, max_p, rsi_range, rci_range, ma60_filter, ma200_filter, min_volume, is_force): t for t in targets}
+            future_to_ticker = {executor.submit(analyze_stock, t, min_p, max_p, rsi_range, rci_range, bb3_filter, ma_trend_filter, sudden_move_filter, min_volume, is_force): t for t in targets}
             
             for i, future in enumerate(concurrent.futures.as_completed(future_to_ticker)):
                 res = future.result()
@@ -203,7 +235,6 @@ if st.button("🛰️ スキャン開始"):
             st.success(f"🎯 検索が完了しました（{len(results)} 件）")
             
             for _, row in df_res.iterrows():
-                # 出来高の数値をカンマ区切りで表示して見やすくする
                 vol_str = f"{row['出来高']:,}"
                 with st.expander(f"{row['判定']} | {row['和名']} ({row['コード']}) RSI:{row['RSI']} / RCI:{row['RCI']} / 出来高:{vol_str}株"):
                     fig = go.Figure(data=[go.Candlestick(x=row['df'].index, open=row['df']['Open'], high=row['df']['High'], low=row['df']['Low'], close=row['df']['Close'], name='価格')])
@@ -211,13 +242,16 @@ if st.button("🛰️ スキャン開始"):
                     fig.add_trace(go.Scatter(x=row['df'].index, y=row['df']['MA20'], line=dict(color='green', width=1), name='20MA(緑)'))
                     fig.add_trace(go.Scatter(x=row['df'].index, y=row['df']['MA60'], line=dict(color='orange', width=1), name='60MA(橙)'))
                     fig.add_trace(go.Scatter(x=row['df'].index, y=row['df']['MA200'], line=dict(color='purple', width=1.5), name='200MA(紫)'))
-                    
-                    # ★追加：VWAP（水色の点線）
                     fig.add_trace(go.Scatter(x=row['df'].index, y=row['df']['VWAP'], line=dict(color='cyan', width=1.5, dash='dot'), name='VWAP(水色点線)'))
+                    
+                    # ★追加：ボリンジャーバンド±3σの表示
+                    fig.add_trace(go.Scatter(x=row['df'].index, y=row['df']['BB_up3'], line=dict(color='pink', width=1, dash='dot'), name='+3σ(ピンク)'))
+                    fig.add_trace(go.Scatter(x=row['df'].index, y=row['df']['BB_low3'], line=dict(color='lightblue', width=1, dash='dot'), name='-3σ(薄青)'))
 
                     fig.add_hline(y=row['指値'], line_dash="dash", line_color="royalblue", annotation_text="指値")
-                    fig.update_layout(height=400, margin=dict(l=0, r=0, b=0, t=0), xaxis_rangeslider_visible=False, showlegend=True)
+                    fig.update_layout(height=450, margin=dict(l=0, r=0, b=0, t=0), xaxis_rangeslider_visible=False, showlegend=True)
                     st.plotly_chart(fig, use_container_width=True)
                     st.write(f"現在値: {row['現在値']}円 / **指値目安: {row['指値']}円**")
         else:
-            st.info("条件に合う銘柄は見つかりませんでした。出来高やフィルタ設定を見直してください。")
+            st.info("条件に合う銘柄は見つかりませんでした。フィルタ設定を見直してください。")
+
