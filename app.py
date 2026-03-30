@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
-import pandas_datareader.data as web
 import plotly.graph_objects as go
 import requests
 from io import BytesIO
@@ -14,7 +13,7 @@ st.set_page_config(layout="wide", page_title="Stock Sniper Pro: 診断", page_ic
 def get_jpx_names():
     url = "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xls"
     try:
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
         res = requests.get(url, headers=headers)
         df = pd.read_excel(BytesIO(res.content), engine='xlrd')
         return dict(zip(df['コード'].astype(str), df['銘柄名']))
@@ -47,45 +46,57 @@ def calculate_dmi(df, period=14):
     adx = rma(100 * (pdi - mdi).abs() / (pdi + mdi), period)
     return pdi, mdi, adx
 
-# --- 4. 診断エンジン（デュアルエンジン搭載） ---
-def diagnose_stock(code, min_v, rsi_t, rci_t):
-    df = pd.DataFrame()
+# --- 4. 究極のデータ取得エンジン ---
+def get_stock_data(code):
+    # ルート1：欧州データサイト(Stooq)からCSVファイルを直接ダウンロード（最強の裏ルート）
     try:
-        # 💡 エンジン1：まずはYahooで取得を試みる
-        try:
-            df = yf.download(f"{code}.T", period="1y", interval="1d", progress=False, timeout=3)
+        url = f"https://stooq.com/q/d/l/?s={code}.jp&i=d"
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+        res = requests.get(url, headers=headers, timeout=5)
+        if res.status_code == 200:
+            df = pd.read_csv(BytesIO(res.content))
+            if not df.empty and 'Close' in df.columns:
+                df['Date'] = pd.to_datetime(df['Date'])
+                df = df.set_index('Date').sort_index()
+                df = df[['Open', 'High', 'Low', 'Close', 'Volume']].tail(250)
+                if len(df) > 60: return df
+    except: pass
+
+    # ルート2：一応Yahooも試す（予備）
+    try:
+        df = yf.download(f"{code}.T", period="1y", interval="1d", progress=False, timeout=3)
+        if not df.empty:
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
-        except: pass
-        
-        # 💡 エンジン2：Yahooがブロックしてきたら、欧州のStooqサーバーから取得
-        if df.empty or len(df) < 100:
-            try:
-                df = web.DataReader(f"{code}.JP", "stooq")
-                df = df.sort_index().tail(250) # Stooqは順番が逆なので並び替えて直近1年分を取得
-            except: pass
+            if len(df) > 60: return df
+    except: pass
+    
+    return pd.DataFrame()
 
-        if df.empty or len(df) < 100: return "empty"
+# --- 5. 診断エンジン ---
+def diagnose_stock(code, min_v, rsi_t, rci_t):
+    try:
+        df = get_stock_data(code)
+        if df.empty: return "empty"
 
-        # 列名の統一と数値化
-        df.columns = [col.capitalize() for col in df.columns]
+        # 確実な数値化
         df = df.astype(float)
-        
         c = df['Close']
+        
         df['MA20'], df['MA60'], df['MA200'] = c.rolling(20).mean(), c.rolling(60).mean(), c.rolling(200).mean()
         df['RSI'] = calculate_rsi(c); df['RCI9'], df['RCI26'] = calculate_rci(c, 9), calculate_rci(c, 26)
         df['+DI'], df['-DI'], df['ADX'] = calculate_dmi(df); df['std'] = c.rolling(20).std()
         df['BBL'], df['BBU'] = df['MA20'] - 3*df['std'], df['MA20'] + 3*df['std']
         
         cur, pre = df.iloc[-1], df.iloc[-2]
-        p = float(cur['Close'])
+        p = cur['Close']
         
         # 判定
         chk = {
-            "出来高クリア": float(df['Volume'].tail(5).mean()) >= min_v,
-            "RSI 底値圏": float(cur['RSI']) <= rsi_t,
-            "RCI 底値圏": float(cur['RCI9']) <= rci_t,
-            "BB ±3σ接近": (p <= float(cur['BBL'])*1.03) or (p >= float(cur['BBU'])*0.97),
+            "出来高クリア": df['Volume'].tail(5).mean() >= min_v,
+            "RSI 底値圏": cur['RSI'] <= rsi_t,
+            "RCI 底値圏": cur['RCI9'] <= rci_t,
+            "BB ±3σ接近": (p <= cur['BBL']*1.03) or (p >= cur['BBU']*0.97),
             "PO (トレンド一致)": (cur['MA20']>pre['MA20'] and cur['MA60']>pre['MA60'] and cur['MA200']>pre['MA200']) or (cur['MA20']<pre['MA20'] and cur['MA60']<pre['MA60'] and cur['MA200']<pre['MA200']),
             "DMI (上昇気配)": cur['+DI']>pre['+DI'] and cur['ADX']>25,
             "RCI クロス": (pre['RCI9']<pre['RCI26'] and cur['RCI9']>cur['RCI26'] and cur['RCI9']<0) or (pre['RCI9']>pre['RCI26'] and cur['RCI9']<cur['RCI26'] and cur['RCI9']>70)
@@ -97,10 +108,9 @@ def diagnose_stock(code, min_v, rsi_t, rci_t):
         else: tmg, col = "☁️ 様子見", "gray"
 
         return {"name": jpx_names.get(code, "銘柄"), "code": code, "price": int(p), "timing": tmg, "color": col, "checks": chk, "df": df}
-    except Exception as e:
-        return str(e)
+    except Exception as e: return str(e)
 
-# --- 5. 画面構築 ---
+# --- 6. 画面構築 ---
 st.title("🏹 Stock Sniper Pro: 精密診断")
 st.sidebar.markdown("### ⚙️ 設定")
 min_v = st.sidebar.number_input("最低出来高", 0, 1000000, 100000)
@@ -113,7 +123,7 @@ if st.button("🩺 診断開始", type="primary"):
         res = diagnose_stock(c, min_v, rsi_t, rci_t)
         if isinstance(res, dict):
             st.markdown(f"### {res['name']} ({res['code']}) : {res['price']:,}円")
-            st.markdown(f"<h4 style='color:{res['color']}'>🤖 AI診断: {res['timing']}</h4>", unsafe_allow_html=True)
+            st.markdown(f"<h4 style='color:{res['color']}'>🤖 判定: {res['timing']}</h4>", unsafe_allow_html=True)
             c1, c2 = st.columns([1, 2])
             with c1:
                 for k, v in res['checks'].items(): st.write(f"{'✅' if v else '❌'} {k}")
@@ -123,4 +133,4 @@ if st.button("🩺 診断開始", type="primary"):
                 st.plotly_chart(fig, use_container_width=True)
             st.divider()
         else:
-            st.error(f"{c}: データの取得に失敗しました。時間をおいて再試行してください。")
+            st.error(f"{c}: データの取得に失敗しました。Yahooからのアクセス遮断を回避中です。")
