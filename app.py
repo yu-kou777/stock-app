@@ -1,10 +1,9 @@
-import yfinance as yf
-import pandas as pd
 import streamlit as st
+import pandas as pd
+from yahooquery import Ticker
 import plotly.graph_objects as go
 import requests
 from io import BytesIO
-import time
 
 # --- 1. アプリ基本設定 ---
 st.set_page_config(layout="wide", page_title="Stock Sniper Pro: 診断", page_icon="🦅")
@@ -22,7 +21,7 @@ def get_jpx_names():
 
 jpx_names = get_jpx_names()
 
-# --- 3. テクニカル指標計算 ---
+# --- 3. テクニカル指標計算（自作関数） ---
 def calculate_rsi(series, period=14):
     delta = series.diff()
     up = delta.clip(lower=0); down = -1 * delta.clip(upper=0)
@@ -49,16 +48,17 @@ def calculate_dmi(df, period=14):
 
 # --- 4. 診断エンジン ---
 def diagnose_stock(code, min_v, rsi_t, rci_t):
-    ticker = f"{code}.T"
+    ticker_symbol = f"{code}.T"
     try:
-        # 💡 Yahooのブロックを突破するため、あえてセッションを最小限にして最新版yfinanceの自動修正に任せる
-        df = yf.download(ticker, period="1y", interval="1d", progress=False, timeout=10)
+        # 💡 yfinanceの代わりに yahooquery を使用（ブロックに強い）
+        t = Ticker(ticker_symbol)
+        df = t.history(period="1y", interval="1d")
         
-        # マルチインデックス対策
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-
-        if df.empty or len(df) < 100: return None
+        if df.empty or 'close' not in df.columns: return None
+        
+        # マルチインデックスの解除と列名の調整
+        if 'symbol' in df.index.names: df = df.reset_index(level=0, drop=True)
+        df = df.rename(columns={'open':'Open', 'high':'High', 'low':'Low', 'close':'Close', 'volume':'Volume'})
 
         # 計算
         c = df['Close']
@@ -88,8 +88,7 @@ def diagnose_stock(code, min_v, rsi_t, rci_t):
         else: tmg, col = "☁️ 様子見", "gray"
 
         return {"name": jpx_names.get(code, "不明銘柄"), "code": code, "price": int(p), "timing": tmg, "color": col, "checks": chk, "df": df}
-    except Exception as e:
-        return None
+    except: return None
 
 # --- 5. 画面構築 ---
 st.title("🏹 Stock Sniper Pro: 精密診断")
@@ -99,7 +98,7 @@ rsi_t = st.sidebar.slider("RSI基準", 0, 100, 40)
 rci_t = st.sidebar.slider("RCI基準", -100, 100, -50)
 
 codes = st.text_area("銘柄コード (例: 9984, 7203)", "9984")
-if st.button("🩺 一斉診断を開始", type="primary"):
+if st.button("🩺 診断開始", type="primary"):
     for c in [x.strip() for x in codes.split(',') if x.strip()]:
         res = diagnose_stock(c, min_v, rsi_t, rci_t)
         if res:
@@ -114,4 +113,5 @@ if st.button("🩺 一斉診断を開始", type="primary"):
                 st.plotly_chart(fig, use_container_width=True)
             st.divider()
         else:
-            st.error(f"{c}: 現在データが取れません。30秒ほど待ってからもう一度押してください。")
+            st.error(f"{c}: データの取得に失敗しました。時間をおいて再試行してください。")
+
