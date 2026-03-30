@@ -1,5 +1,6 @@
 streamlit
-yahooquery
+yfinance>=0.2.52
 pandas
 requests
 plotly
+xlrd
