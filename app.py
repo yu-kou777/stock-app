@@ -4,152 +4,115 @@ import streamlit as st
 import plotly.graph_objects as go
 import requests
 from io import BytesIO
+import time
 
 # --- 1. アプリ基本設定 ---
 st.set_page_config(layout="wide", page_title="Stock Sniper Pro: 診断 Edition", page_icon="🦅")
 
-# --- 2. データベース & JPX全銘柄名簿の自動取得 ---
+# --- 2. 銘柄名取得（JPX） ---
 @st.cache_data(ttl=86400)
-def get_jpx_master():
+def get_jpx_names():
     url = "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xls"
     try:
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
         res = requests.get(url, headers=headers)
-        res.raise_for_status()
         df = pd.read_excel(BytesIO(res.content), engine='xlrd')
-        names = dict(zip(df['コード'].astype(str), df['銘柄名']))
-        return names
-    except Exception as e:
-        return {}
+        return dict(zip(df['コード'].astype(str), df['銘柄名']))
+    except: return {}
 
-jpx_names = get_jpx_master()
+jpx_names = get_jpx_names()
 
-# --- 3. テクニカル指標の完全自作関数 ---
+# --- 3. 指標計算ロジック ---
 def calculate_rsi(series, period=14):
-    delta = series.diff()
-    up = delta.clip(lower=0)
-    down = -1 * delta.clip(upper=0)
+    delta = series.diff(); up = delta.clip(lower=0); down = -1 * delta.clip(upper=0)
     ema_up = up.ewm(com=period-1, adjust=False).mean()
     ema_down = down.ewm(com=period-1, adjust=False).mean()
-    rs = ema_up / ema_down
-    return 100 - (100 / (1 + rs))
+    return 100 - (100 / (1 + (ema_up / ema_down)))
 
 def calculate_rci(series, period):
     def rci_logic(s):
-        n = len(s)
-        time_ranks = list(range(n, 0, -1))
-        price_ranks = pd.Series(s).rank(ascending=False).tolist()
-        sum_d2 = sum((tr - pr) ** 2 for tr, pr in zip(time_ranks, price_ranks))
-        return (1 - (6 * sum_d2) / (n * (n**2 - 1))) * 100
+        n = len(s); tr = list(range(n, 0, -1)); pr = pd.Series(s).rank(ascending=False).tolist()
+        return (1 - (6 * sum((t - p) ** 2 for t, p in zip(tr, pr))) / (n * (n**2 - 1))) * 100
     return series.rolling(window=period).apply(rci_logic)
 
 def calculate_dmi(df, period=14):
-    high, low, close = df['High'], df['Low'], df['Close']
-    prev_close = close.shift(1)
-    tr = pd.concat([high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
-    up_move = high - high.shift(1)
-    down_move = low.shift(1) - low
-    plus_dm = pd.Series(0.0, index=df.index)
-    minus_dm = pd.Series(0.0, index=df.index)
-    plus_dm[(up_move > down_move) & (up_move > 0)] = up_move
-    minus_dm[(down_move > up_move) & (down_move > 0)] = down_move
-    def rma(series, p): return series.ewm(alpha=1/p, adjust=False).mean()
-    atr = rma(tr, period)
-    plus_di = 100 * rma(plus_dm, period) / atr
-    minus_di = 100 * rma(minus_dm, period) / atr
-    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di)
-    adx = rma(dx, period)
-    return plus_di, minus_di, adx
+    h, l, c = df['High'], df['Low'], df['Close']; pc = c.shift(1)
+    tr = pd.concat([h-l, (h-pc).abs(), (l-pc).abs()], axis=1).max(axis=1)
+    um, dm = h - h.shift(1), l.shift(1) - l
+    pdm, mdm = pd.Series(0.0, index=df.index), pd.Series(0.0, index=df.index)
+    pdm[(um > dm) & (um > 0)] = um; mdm[(dm > um) & (dm > 0)] = dm
+    def rma(s, p): return s.ewm(alpha=1/p, adjust=False).mean()
+    atr = rma(tr, period); pdi = 100 * rma(pdm, period) / atr; mdi = 100 * rma(mdm, period) / atr
+    adx = rma(100 * (pdi - mdi).abs() / (pdi + mdi), period)
+    return pdi, mdi, adx
 
-# --- 4. 個別銘柄の精密診断エンジン ---
-def diagnose_stock(ticker, min_vol, rsi_target, rci_target):
+# --- 4. 診断エンジン ---
+def diagnose_stock(code, min_vol, rsi_t, rci_t):
+    ticker = f"{code}.T" if code.isdigit() else code
     try:
-        # 💡 通信セッションにブラウザのふりをさせる設定を追加
+        # 💡 Yahooのブロックを突破する究極の変装
         session = requests.Session()
-        session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'})
+        session.headers.update({'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/604.1'})
         
         tkr = yf.Ticker(ticker, session=session)
-        df = tkr.history(period="1y", interval="1d", actions=False)
-        if df.empty or len(df) < 200: return None
+        # 取得できない場合は3回までリトライ
+        df = pd.DataFrame()
+        for _ in range(3):
+            df = tkr.history(period="1y", interval="1d", actions=False)
+            if not df.empty: break
+            time.sleep(1)
 
-        price = df['Close'].iloc[-1]
-        open_p = df['Open'].iloc[-1]
-        avg_vol = df['Volume'].tail(5).mean()
+        if df.empty or len(df) < 100: return None
+
+        # 計算
+        c = df['Close']; df['MA20'], df['MA60'], df['MA200'] = c.rolling(20).mean(), c.rolling(60).mean(), c.rolling(200).mean()
+        df['RSI'] = calculate_rsi(c); df['RCI9'], df['RCI26'] = calculate_rci(c, 9), calculate_rci(c, 26)
+        df['+DI'], df['-DI'], df['ADX'] = calculate_dmi(df); df['std'] = c.rolling(20).std()
+        df['BBL'], df['BBU'] = df['MA20'] - 3*df['std'], df['MA20'] + 3*df['std']
+
+        cur, pre = df.iloc[-1], df.iloc[-2]
+        p = cur['Close']
         
-        df['MA20'] = df['Close'].rolling(20).mean()
-        df['MA60'] = df['Close'].rolling(60).mean()
-        df['MA200'] = df['Close'].rolling(200).mean()
-        df['std20'] = df['Close'].rolling(20).std()
-        df['BB_up3'] = df['MA20'] + 3 * df['std20']
-        df['BB_low3'] = df['MA20'] - 3 * df['std20']
-        typical_price = (df['High'] + df['Low'] + df['Close']) / 3
-        df['VWAP'] = (typical_price * df['Volume']).rolling(20).sum() / df['Volume'].rolling(20).sum()
-        df['RSI'] = calculate_rsi(df['Close'], 14)
-        df['RCI_9'] = calculate_rci(df['Close'], 9)
-        df['RCI_26'] = calculate_rci(df['Close'], 26)
-        df['+DI'], df['-DI'], df['ADX'] = calculate_dmi(df, 14)
-
-        curr, prev = df.iloc[-1], df.iloc[-2]
-        high20, low20 = df['High'].tail(20).max(), df['Low'].tail(20).min()
-
-        # 🎯 判定
-        chk_vol = avg_vol >= min_vol
-        chk_rsi = curr['RSI'] <= rsi_target
-        chk_rci = curr['RCI_9'] <= rci_target
-        chk_bb = (price <= curr['BB_low3'] * 1.03) or (price >= curr['BB_up3'] * 0.97)
-        ma_all_up = (curr['MA20'] > prev['MA20']) and (curr['MA60'] > prev['MA60']) and (curr['MA200'] > prev['MA200'])
-        ma_all_down = (curr['MA20'] < prev['MA20']) and (curr['MA60'] < prev['MA60']) and (curr['MA200'] < prev['MA200'])
-        chk_po = ma_all_up or ma_all_down
-        chk_sudden = (price <= high20 * 0.8) or (price >= low20 * 1.2)
-        chk_dmi = (curr['+DI'] > prev['+DI']) and (curr['ADX'] > prev['ADX']) and (curr['ADX'] > 25)
-        rci_gc = (prev['RCI_9'] < prev['RCI_26']) and (curr['RCI_9'] > curr['RCI_26']) and (curr['RCI_9'] < 0)
-        rci_dc = (prev['RCI_9'] > prev['RCI_26']) and (curr['RCI_9'] < curr['RCI_26']) and (curr['RCI_9'] > 70)
-        chk_rci_cross = rci_gc or rci_dc
-
-        # ⏱️ タイミング
-        if rci_dc: timing, color = "⏳ 数日待つべき (天井からの下落警戒)", "red"
-        elif rci_gc and (chk_dmi or price > open_p): timing, color = "🌇 大引け前に買うべき (反発シグナル点灯)", "green"
-        elif chk_rci or chk_rsi or (price <= curr['BB_low3'] * 1.03):
-            if curr['-DI'] > curr['+DI'] and curr['ADX'] > 25: timing, color = "⏳ 数日待つべき (下落トレンドが強すぎる)", "orange"
-            else: timing, color = "🌅 翌日の寄り付きで買うべき (底値圏・反発確認要)", "blue"
-        elif chk_dmi and ma_all_up: timing, color = "🌇 大引け前に買うべき (強い上昇トレンド・順張り)", "green"
-        else: timing, color = "☁️ 様子見 (明確なシグナルなし)", "gray"
-
-        return {
-            "ticker": ticker.replace(".T", ""), "name": jpx_names.get(ticker.replace(".T", ""), "不明"),
-            "price": int(price), "timing": timing, "color": color, "df": df, "checks": {
-                "出来高クリア": chk_vol, "RSI 底値圏": chk_rsi, "RCI 底値圏": chk_rci, "ボリンジャー±3σ接近": chk_bb,
-                "MAパーフェクトオーダー": chk_po, "直近20日 急騰/急落": chk_sudden, "DMI トレンド強気": chk_dmi, "RCI クロス発生": chk_rci_cross
-            }
+        # 判定
+        chk = {
+            "出来高": df['Volume'].tail(5).mean() >= min_vol,
+            "RSI": cur['RSI'] <= rsi_t,
+            "RCI": cur['RCI9'] <= rci_t,
+            "BB": (p <= cur['BBL']*1.03) or (p >= cur['BBU']*0.97),
+            "PO": (cur['MA20']>pre['MA20'] and cur['MA60']>pre['MA60'] and cur['MA200']>pre['MA200']) or (cur['MA20']<pre['MA20'] and cur['MA60']<pre['MA60'] and cur['MA200']<pre['MA200']),
+            "DMI": cur['+DI']>pre['+DI'] and cur['ADX']>pre['ADX'] and cur['ADX']>25,
+            "RCIクロス": (pre['RCI9']<pre['RCI26'] and cur['RCI9']>cur['RCI26'] and cur['RCI9']<0) or (pre['RCI9']>pre['RCI26'] and cur['RCI9']<cur['RCI26'] and cur['RCI9']>70)
         }
+
+        # タイミング判定
+        if (pre['RCI9']>pre['RCI26'] and cur['RCI9']<cur['RCI26'] and cur['RCI9']>70): tmg, col = "⏳ 待機 (天井圏DC)", "red"
+        elif (pre['RCI9']<pre['RCI26'] and cur['RCI9']>cur['RCI26'] and cur['RCI9']<0): tmg, col = "🌇 大引け (反発GC)", "green"
+        elif chk["RSI"] or chk["RCI"] or chk["BB"]: tmg, col = "🌅 翌朝寄り付き (底打ち確認要)", "blue"
+        else: tmg, col = "☁️ 様子見", "gray"
+
+        return {"name": jpx_names.get(code, "不明"), "code": code, "price": int(p), "timing": tmg, "color": col, "checks": chk, "df": df}
     except: return None
 
-# --- 5. 画面構築 ---
-st.title("🏹 Stock Sniper Pro: 精密診断 Edition")
-st.sidebar.title("⚙️ 設定")
-min_vol = st.sidebar.number_input("合格最低出来高", 0, 100000000, 100000, step=50000)
-rsi_target = st.sidebar.slider("RSI 底値圏基準", 0, 100, 40)
-rci_target = st.sidebar.slider("RCI 底値圏基準", -100, 100, -50)
+# --- 5. UI ---
+st.title("🏹 Stock Sniper Pro: 精密診断")
+st.sidebar.markdown("### ⚙️ 判定基準")
+min_v = st.sidebar.number_input("最低出来高", 0, 1000000, 100000)
+rsi_t = st.sidebar.slider("RSI基準", 0, 100, 40)
+rci_t = st.sidebar.slider("RCI基準", -100, 100, -50)
 
-input_tickers = st.text_area("診断したいコード (例: 7203, 9984)", "9984, 6701, 7203")
-
-if st.button("🩺 一斉診断する", type="primary"):
-    ticker_list = [f"{t.strip()}.T" if t.strip().isdigit() else t.strip() for t in input_tickers.split(',') if t.strip()]
-    if ticker_list:
-        bar = st.progress(0)
-        for i, t in enumerate(ticker_list):
-            res = diagnose_stock(t, min_vol, rsi_target, rci_target)
-            if res:
-                st.markdown(f"### {res['name']} ({res['ticker']}) - {res['price']:,}円")
-                st.markdown(f"<h4 style='color: {res['color']};'>🤖 判定: {res['timing']}</h4>", unsafe_allow_html=True)
-                col1, col2 = st.columns([1, 2])
-                with col1:
-                    for label, passed in res['checks'].items():
-                        st.write(f"{'✅' if passed else '❌'} {label}")
-                with col2:
-                    fig = go.Figure(data=[go.Candlestick(x=res['df'].index, open=res['df']['Open'], high=res['df']['High'], low=res['df']['Low'], close=res['df']['Close'])])
-                    fig.update_layout(height=350, margin=dict(l=0,r=0,b=0,t=0), xaxis_rangeslider_visible=False)
-                    st.plotly_chart(fig, use_container_width=True)
-                st.divider()
-            else: st.error(f"{t}: データ取得に失敗しました。")
-            bar.progress((i + 1) / len(ticker_list))
+codes = st.text_area("銘柄コード (例: 9984, 7203)", "9984, 7203")
+if st.button("🩺 診断開始", type="primary"):
+    for c in [x.strip() for x in codes.split(',') if x.strip()]:
+        res = diagnose_stock(c, min_v, rsi_t, rci_t)
+        if res:
+            st.markdown(f"### {res['name']} ({res['code']}) : {res['price']:,}円")
+            st.markdown(f"<h4 style='color:{res['color']}'>🤖 判定: {res['timing']}</h4>", unsafe_allow_html=True)
+            c1, c2 = st.columns([1, 2])
+            with c1:
+                for k, v in res['checks'].items(): st.write(f"{'✅' if v else '❌'} {k}")
+            with c2:
+                fig = go.Figure(data=[go.Candlestick(x=res['df'].index, open=res['df']['Open'], high=res['df']['High'], low=res['df']['Low'], close=res['df']['Close'])])
+                fig.update_layout(height=300, margin=dict(l=0,r=0,b=0,t=0), xaxis_rangeslider_visible=False)
+                st.plotly_chart(fig, use_container_width=True)
+            st.divider()
+        else: st.error(f"{c}: データの取得に失敗しました。時間をおいて試してください。")
