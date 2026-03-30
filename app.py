@@ -51,17 +51,19 @@ def calculate_dmi(df, period=14):
 def diagnose_stock(code, min_v, rsi_t, rci_t):
     ticker_symbol = f"{code}.T"
     try:
-        # 💡 yahooqueryを使用して日本サーバー経由っぽく振る舞う
-        t = Ticker(ticker_symbol, country='japan')
+        # ★修正：'country' 指定を削除してエラーを回避
+        t = Ticker(ticker_symbol)
         df = t.history(period="1y", interval="1d")
         
-        if df.empty:
+        if df.empty or (isinstance(df, dict) and 'error' in df):
             return "empty"
         
-        # マルチインデックスの解除
+        # インデックスの調整（yahooquery特有の処理）
         if isinstance(df.index, pd.MultiIndex):
             df = df.reset_index(level=0, drop=True)
-            
+        elif 'symbol' in df.columns:
+            df = df.set_index('date')
+
         df = df.rename(columns={'open':'Open', 'high':'High', 'low':'Low', 'close':'Close', 'volume':'Volume'})
 
         # 計算
@@ -117,7 +119,5 @@ if st.button("🩺 診断開始", type="primary"):
                 fig.update_layout(height=300, margin=dict(l=0,r=0,b=0,t=0), xaxis_rangeslider_visible=False)
                 st.plotly_chart(fig, use_container_width=True)
             st.divider()
-        elif res == "empty":
-            st.error(f"{c}: Yahooからデータが届きませんでした。サーバーがブロックされている可能性があります。")
         else:
-            st.error(f"{c}: エラーが発生しました: {res}")
+            st.error(f"{c}: データの取得に失敗しました。時間をおいて再試行してください。")
