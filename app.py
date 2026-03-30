@@ -7,7 +7,7 @@ from io import BytesIO
 import time
 
 # --- 1. アプリ基本設定 ---
-st.set_page_config(layout="wide", page_title="Stock Sniper Pro: 診断 Edition", page_icon="🦅")
+st.set_page_config(layout="wide", page_title="Stock Sniper Pro: 診断", page_icon="🦅")
 
 # --- 2. 銘柄名取得（JPX） ---
 @st.cache_data(ttl=86400)
@@ -22,9 +22,10 @@ def get_jpx_names():
 
 jpx_names = get_jpx_names()
 
-# --- 3. 指標計算ロジック ---
+# --- 3. テクニカル指標計算 ---
 def calculate_rsi(series, period=14):
-    delta = series.diff(); up = delta.clip(lower=0); down = -1 * delta.clip(upper=0)
+    delta = series.diff()
+    up = delta.clip(lower=0); down = -1 * delta.clip(upper=0)
     ema_up = up.ewm(com=period-1, adjust=False).mean()
     ema_down = down.ewm(com=period-1, adjust=False).mean()
     return 100 - (100 / (1 + (ema_up / ema_down)))
@@ -47,66 +48,63 @@ def calculate_dmi(df, period=14):
     return pdi, mdi, adx
 
 # --- 4. 診断エンジン ---
-def diagnose_stock(code, min_vol, rsi_t, rci_t):
-    ticker = f"{code}.T" if code.isdigit() else code
+def diagnose_stock(code, min_v, rsi_t, rci_t):
+    ticker = f"{code}.T"
     try:
-        # 💡 Yahooのブロックを突破する究極の変装
-        session = requests.Session()
-        session.headers.update({'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/604.1'})
+        # 💡 Yahooのブロックを突破するため、あえてセッションを最小限にして最新版yfinanceの自動修正に任せる
+        df = yf.download(ticker, period="1y", interval="1d", progress=False, timeout=10)
         
-        tkr = yf.Ticker(ticker, session=session)
-        # 取得できない場合は3回までリトライ
-        df = pd.DataFrame()
-        for _ in range(3):
-            df = tkr.history(period="1y", interval="1d", actions=False)
-            if not df.empty: break
-            time.sleep(1)
+        # マルチインデックス対策
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
 
         if df.empty or len(df) < 100: return None
 
         # 計算
-        c = df['Close']; df['MA20'], df['MA60'], df['MA200'] = c.rolling(20).mean(), c.rolling(60).mean(), c.rolling(200).mean()
+        c = df['Close']
+        df['MA20'], df['MA60'], df['MA200'] = c.rolling(20).mean(), c.rolling(60).mean(), c.rolling(200).mean()
         df['RSI'] = calculate_rsi(c); df['RCI9'], df['RCI26'] = calculate_rci(c, 9), calculate_rci(c, 26)
         df['+DI'], df['-DI'], df['ADX'] = calculate_dmi(df); df['std'] = c.rolling(20).std()
         df['BBL'], df['BBU'] = df['MA20'] - 3*df['std'], df['MA20'] + 3*df['std']
-
+        
         cur, pre = df.iloc[-1], df.iloc[-2]
         p = cur['Close']
         
         # 判定
         chk = {
-            "出来高": df['Volume'].tail(5).mean() >= min_vol,
-            "RSI": cur['RSI'] <= rsi_t,
-            "RCI": cur['RCI9'] <= rci_t,
-            "BB": (p <= cur['BBL']*1.03) or (p >= cur['BBU']*0.97),
-            "PO": (cur['MA20']>pre['MA20'] and cur['MA60']>pre['MA60'] and cur['MA200']>pre['MA200']) or (cur['MA20']<pre['MA20'] and cur['MA60']<pre['MA60'] and cur['MA200']<pre['MA200']),
-            "DMI": cur['+DI']>pre['+DI'] and cur['ADX']>pre['ADX'] and cur['ADX']>25,
-            "RCIクロス": (pre['RCI9']<pre['RCI26'] and cur['RCI9']>cur['RCI26'] and cur['RCI9']<0) or (pre['RCI9']>pre['RCI26'] and cur['RCI9']<cur['RCI26'] and cur['RCI9']>70)
+            "出来高クリア": df['Volume'].tail(5).mean() >= min_v,
+            "RSI 底値圏": cur['RSI'] <= rsi_t,
+            "RCI 底値圏": cur['RCI9'] <= rci_t,
+            "BB ±3σ接近": (p <= cur['BBL']*1.03) or (p >= cur['BBU']*0.97),
+            "PO (トレンド一致)": (cur['MA20']>pre['MA20'] and cur['MA60']>pre['MA60'] and cur['MA200']>pre['MA200']) or (cur['MA20']<pre['MA20'] and cur['MA60']<pre['MA60'] and cur['MA200']<pre['MA200']),
+            "DMI (上昇気配)": cur['+DI']>pre['+DI'] and cur['ADX']>25,
+            "RCI クロス": (pre['RCI9']<pre['RCI26'] and cur['RCI9']>cur['RCI26'] and cur['RCI9']<0) or (pre['RCI9']>pre['RCI26'] and cur['RCI9']<cur['RCI26'] and cur['RCI9']>70)
         }
 
-        # タイミング判定
+        # タイミング診断
         if (pre['RCI9']>pre['RCI26'] and cur['RCI9']<cur['RCI26'] and cur['RCI9']>70): tmg, col = "⏳ 待機 (天井圏DC)", "red"
         elif (pre['RCI9']<pre['RCI26'] and cur['RCI9']>cur['RCI26'] and cur['RCI9']<0): tmg, col = "🌇 大引け (反発GC)", "green"
         elif chk["RSI"] or chk["RCI"] or chk["BB"]: tmg, col = "🌅 翌朝寄り付き (底打ち確認要)", "blue"
         else: tmg, col = "☁️ 様子見", "gray"
 
-        return {"name": jpx_names.get(code, "不明"), "code": code, "price": int(p), "timing": tmg, "color": col, "checks": chk, "df": df}
-    except: return None
+        return {"name": jpx_names.get(code, "不明銘柄"), "code": code, "price": int(p), "timing": tmg, "color": col, "checks": chk, "df": df}
+    except Exception as e:
+        return None
 
-# --- 5. UI ---
+# --- 5. 画面構築 ---
 st.title("🏹 Stock Sniper Pro: 精密診断")
-st.sidebar.markdown("### ⚙️ 判定基準")
+st.sidebar.markdown("### ⚙️ 判定基準設定")
 min_v = st.sidebar.number_input("最低出来高", 0, 1000000, 100000)
 rsi_t = st.sidebar.slider("RSI基準", 0, 100, 40)
 rci_t = st.sidebar.slider("RCI基準", -100, 100, -50)
 
-codes = st.text_area("銘柄コード (例: 9984, 7203)", "9984, 7203")
-if st.button("🩺 診断開始", type="primary"):
+codes = st.text_area("銘柄コード (例: 9984, 7203)", "9984")
+if st.button("🩺 一斉診断を開始", type="primary"):
     for c in [x.strip() for x in codes.split(',') if x.strip()]:
         res = diagnose_stock(c, min_v, rsi_t, rci_t)
         if res:
             st.markdown(f"### {res['name']} ({res['code']}) : {res['price']:,}円")
-            st.markdown(f"<h4 style='color:{res['color']}'>🤖 判定: {res['timing']}</h4>", unsafe_allow_html=True)
+            st.markdown(f"<h4 style='color:{res['color']}'>🤖 AI診断: {res['timing']}</h4>", unsafe_allow_html=True)
             c1, c2 = st.columns([1, 2])
             with c1:
                 for k, v in res['checks'].items(): st.write(f"{'✅' if v else '❌'} {k}")
@@ -115,4 +113,5 @@ if st.button("🩺 診断開始", type="primary"):
                 fig.update_layout(height=300, margin=dict(l=0,r=0,b=0,t=0), xaxis_rangeslider_visible=False)
                 st.plotly_chart(fig, use_container_width=True)
             st.divider()
-        else: st.error(f"{c}: データの取得に失敗しました。時間をおいて試してください。")
+        else:
+            st.error(f"{c}: 現在データが取れません。30秒ほど待ってからもう一度押してください。")
