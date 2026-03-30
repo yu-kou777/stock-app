@@ -1,9 +1,10 @@
 import streamlit as st
 import pandas as pd
-from yahooquery import Ticker
+import yfinance as yf
 import plotly.graph_objects as go
 import requests
 from io import BytesIO
+import time
 
 # --- 1. アプリ基本設定 ---
 st.set_page_config(layout="wide", page_title="Stock Sniper Pro: 診断", page_icon="🦅")
@@ -21,14 +22,12 @@ def get_jpx_names():
 
 jpx_names = get_jpx_names()
 
-# --- 3. 自作テクニカル指標 ---
+# --- 3. 指標計算ロジック ---
 def calculate_rsi(series, period=14):
-    delta = series.diff()
-    up = delta.clip(lower=0); down = -1 * delta.clip(upper=0)
+    delta = series.diff(); up = delta.clip(lower=0); down = -1 * delta.clip(upper=0)
     ema_up = up.ewm(com=period-1, adjust=False).mean()
     ema_down = down.ewm(com=period-1, adjust=False).mean()
-    rs = ema_up / ema_down
-    return 100 - (100 / (1 + rs))
+    return 100 - (100 / (1 + (ema_up / ema_down)))
 
 def calculate_rci(series, period):
     def rci_logic(s):
@@ -49,40 +48,38 @@ def calculate_dmi(df, period=14):
 
 # --- 4. 診断エンジン ---
 def diagnose_stock(code, min_v, rsi_t, rci_t):
-    ticker_symbol = f"{code}.T"
+    ticker = f"{code}.T"
     try:
-        # ★修正：'country' 指定を削除してエラーを回避
-        t = Ticker(ticker_symbol)
-        df = t.history(period="1y", interval="1d")
+        # 💡 yf.download の最新仕様で取得（最もブロックに強い方法）
+        df = yf.download(ticker, period="1y", interval="1d", progress=False, timeout=15)
         
-        if df.empty or (isinstance(df, dict) and 'error' in df):
-            return "empty"
-        
-        # インデックスの調整（yahooquery特有の処理）
-        if isinstance(df.index, pd.MultiIndex):
-            df = df.reset_index(level=0, drop=True)
-        elif 'symbol' in df.columns:
-            df = df.set_index('date')
+        # 取得失敗時のリトライ
+        if df.empty:
+            time.sleep(2)
+            df = yf.download(ticker, period="1y", interval="1d", progress=False)
 
-        df = df.rename(columns={'open':'Open', 'high':'High', 'low':'Low', 'close':'Close', 'volume':'Volume'})
+        if df.empty: return "empty"
+
+        # マルチインデックス対応（最新版のyfinance対策）
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
 
         # 計算
         c = df['Close']
         df['MA20'], df['MA60'], df['MA200'] = c.rolling(20).mean(), c.rolling(60).mean(), c.rolling(200).mean()
-        df['RSI'] = calculate_rsi(c)
-        df['RCI9'], df['RCI26'] = calculate_rci(c, 9), calculate_rci(c, 26)
-        df['+DI'], df['-DI'], df['ADX'] = calculate_dmi(df)
-        df['std'] = c.rolling(20).std(); df['BBL'], df['BBU'] = df['MA20'] - 3*df['std'], df['MA20'] + 3*df['std']
+        df['RSI'] = calculate_rsi(c); df['RCI9'], df['RCI26'] = calculate_rci(c, 9), calculate_rci(c, 26)
+        df['+DI'], df['-DI'], df['ADX'] = calculate_dmi(df); df['std'] = c.rolling(20).std()
+        df['BBL'], df['BBU'] = df['MA20'] - 3*df['std'], df['MA20'] + 3*df['std']
         
         cur, pre = df.iloc[-1], df.iloc[-2]
-        p = cur['Close']
+        p = float(cur['Close'])
         
         # 判定
         chk = {
-            "出来高クリア": df['Volume'].tail(5).mean() >= min_v,
-            "RSI 底値圏": cur['RSI'] <= rsi_t,
-            "RCI 底値圏": cur['RCI9'] <= rci_t,
-            "BB ±3σ接近": (p <= cur['BBL']*1.03) or (p >= cur['BBU']*0.97),
+            "出来高クリア": float(df['Volume'].tail(5).mean()) >= min_v,
+            "RSI 底値圏": float(cur['RSI']) <= rsi_t,
+            "RCI 底値圏": float(cur['RCI9']) <= rci_t,
+            "BB ±3σ接近": (p <= float(cur['BBL'])*1.03) or (p >= float(cur['BBU'])*0.97),
             "PO (トレンド一致)": (cur['MA20']>pre['MA20'] and cur['MA60']>pre['MA60'] and cur['MA200']>pre['MA200']) or (cur['MA20']<pre['MA20'] and cur['MA60']<pre['MA60'] and cur['MA200']<pre['MA200']),
             "DMI (上昇気配)": cur['+DI']>pre['+DI'] and cur['ADX']>25,
             "RCI クロス": (pre['RCI9']<pre['RCI26'] and cur['RCI9']>cur['RCI26'] and cur['RCI9']<0) or (pre['RCI9']>pre['RCI26'] and cur['RCI9']<cur['RCI26'] and cur['RCI9']>70)
@@ -93,7 +90,7 @@ def diagnose_stock(code, min_v, rsi_t, rci_t):
         elif chk["RSI"] or chk["RCI"] or chk["BB"]: tmg, col = "🌅 翌朝寄り付き (反発確認)", "blue"
         else: tmg, col = "☁️ 様子見", "gray"
 
-        return {"name": jpx_names.get(code, "不明"), "code": code, "price": int(p), "timing": tmg, "color": col, "checks": chk, "df": df}
+        return {"name": jpx_names.get(code, "銘柄"), "code": code, "price": int(p), "timing": tmg, "color": col, "checks": chk, "df": df}
     except Exception as e:
         return str(e)
 
@@ -120,4 +117,4 @@ if st.button("🩺 診断開始", type="primary"):
                 st.plotly_chart(fig, use_container_width=True)
             st.divider()
         else:
-            st.error(f"{c}: データの取得に失敗しました。時間をおいて再試行してください。")
+            st.error(f"{c}: データの取得に失敗しました。最新の部品(v0.2.52+)が正しく入っているか確認してください。")
