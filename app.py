@@ -1,13 +1,12 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
-import pandas_datareader.data as web
 import plotly.graph_objects as go
 import requests
 from io import BytesIO
 
-# --- 1. アプリ基本設定 ---
-st.set_page_config(layout="wide", page_title="Stock Sniper Pro: 精密診断", page_icon="🦅")
+# --- 1. 基本設定 ---
+st.set_page_config(layout="wide", page_title="Stock Sniper Pro", page_icon="🦅")
 
 # --- 2. 銘柄名取得（JPX） ---
 @st.cache_data(ttl=86400)
@@ -22,7 +21,7 @@ def get_jpx_names():
 
 jpx_names = get_jpx_names()
 
-# --- 3. 自作テクニカル計算 ---
+# --- 3. テクニカル計算関数 ---
 def calculate_rsi(series, period=14):
     delta = series.diff()
     up = delta.clip(lower=0); down = -1 * delta.clip(upper=0)
@@ -47,38 +46,38 @@ def calculate_dmi(df, period=14):
     adx = rma(100 * (pdi - mdi).abs() / (pdi + mdi), period)
     return pdi, mdi, adx
 
-# --- 4. 究極のデータ取得エンジン ---
+# --- 4. データ取得エンジン（Stooq直接 or yfinance） ---
 def get_stock_data(code):
-    err_log = ""
+    # ルート1：StooqからCSVを直接DL（ブロックに強い）
     try:
-        df = web.DataReader(f"{code}.JP", "stooq")
-        if not df.empty:
-            df = df.sort_index().tail(250)
-            if len(df) > 60: return df, ""
-    except Exception as e: err_log += f"[Stooq: {e}] "
-
+        url = f"https://stooq.com/q/d/l/?s={code}.jp&i=d"
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        res = requests.get(url, headers=headers, timeout=5)
+        if res.status_code == 200:
+            df = pd.read_csv(BytesIO(res.content))
+            if not df.empty and 'Close' in df.columns:
+                df['Date'] = pd.to_datetime(df['Date'])
+                df = df.set_index('Date').sort_index()
+                df = df[['Open', 'High', 'Low', 'Close', 'Volume']].tail(250)
+                return df
+    except: pass
+    # ルート2：yfinance
     try:
-        df = yf.download(f"{code}.T", period="1y", interval="1d", progress=False, timeout=5)
+        df = yf.download(f"{code}.T", period="1y", interval="1d", progress=False)
         if not df.empty:
             if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
-            if len(df) > 60: return df, ""
-    except Exception as e: err_log += f"[Yahoo: {e}]"
-
-    return pd.DataFrame(), err_log
+            return df
+    except: pass
+    return pd.DataFrame()
 
 # --- 5. 診断エンジン ---
 def diagnose_stock(code, min_v, rsi_t, rci_t):
     try:
-        df, err_msg = get_stock_data(code)
-        if df.empty: return f"データ取得失敗。詳細 ➡ {err_msg}"
-
-        # 💡 追加：空っぽのデータ(NaN)を排除する安全装置
-        df = df.dropna(subset=['Close'])
-        if df.empty or len(df) < 60: return "有効な株価データが不足しています。"
-
-        df = df.astype(float)
-        c = df['Close']
+        df = get_stock_data(code)
+        if df.empty: return "データが見つかりません。"
+        df = df.dropna(subset=['Close']).astype(float)
         
+        c = df['Close']
         df['MA20'], df['MA60'], df['MA200'] = c.rolling(20).mean(), c.rolling(60).mean(), c.rolling(200).mean()
         df['RSI'] = calculate_rsi(c); df['RCI9'], df['RCI26'] = calculate_rci(c, 9), calculate_rci(c, 26)
         df['+DI'], df['-DI'], df['ADX'] = calculate_dmi(df); df['std'] = c.rolling(20).std()
@@ -87,16 +86,13 @@ def diagnose_stock(code, min_v, rsi_t, rci_t):
         cur, pre = df.iloc[-1], df.iloc[-2]
         p = cur['Close']
         
-        # 💡 安全な価格変換（空っぽなら0にする）
-        safe_price = int(p) if pd.notna(p) else 0
-        
         chk = {
             "出来高クリア": df['Volume'].tail(5).mean() >= min_v,
             "RSI 底値圏": cur['RSI'] <= rsi_t,
             "RCI 底値圏": cur['RCI9'] <= rci_t,
             "BB ±3σ接近": (p <= cur['BBL']*1.03) or (p >= cur['BBU']*0.97),
-            "PO (トレンド一致)": (cur['MA20']>pre['MA20'] and cur['MA60']>pre['MA60'] and cur['MA200']>pre['MA200']) or (cur['MA20']<pre['MA20'] and cur['MA60']<pre['MA60'] and cur['MA200']<pre['MA200']),
-            "DMI (上昇気配)": cur['+DI']>pre['+DI'] and cur['ADX']>25,
+            "トレンド一致": (cur['MA20']>pre['MA20'] and cur['MA60']>pre['MA60'] and cur['MA200']>pre['MA200']) or (cur['MA20']<pre['MA20'] and cur['MA60']<pre['MA60'] and cur['MA200']<pre['MA200']),
+            "DMI 上昇気配": cur['+DI']>pre['+DI'] and cur['ADX']>25,
             "RCI クロス": (pre['RCI9']<pre['RCI26'] and cur['RCI9']>cur['RCI26'] and cur['RCI9']<0) or (pre['RCI9']>pre['RCI26'] and cur['RCI9']<cur['RCI26'] and cur['RCI9']>70)
         }
 
@@ -105,8 +101,8 @@ def diagnose_stock(code, min_v, rsi_t, rci_t):
         elif chk["RSI 底値圏"] or chk["RCI 底値圏"] or chk["BB ±3σ接近"]: tmg, col = "🌅 翌朝寄り付き (反発確認)", "blue"
         else: tmg, col = "☁️ 様子見", "gray"
 
-        return {"name": jpx_names.get(code, "銘柄"), "code": code, "price": safe_price, "timing": tmg, "color": col, "checks": chk, "df": df}
-    except Exception as e: return f"プログラム処理エラー: {str(e)}"
+        return {"name": jpx_names.get(code, "銘柄"), "code": code, "price": int(p), "timing": tmg, "color": col, "checks": chk, "df": df}
+    except Exception as e: return f"エラー: {e}"
 
 # --- 6. 画面構築 ---
 st.title("🏹 Stock Sniper Pro: 精密診断")
@@ -115,7 +111,7 @@ min_v = st.sidebar.number_input("最低出来高", 0, 1000000, 100000)
 rsi_t = st.sidebar.slider("RSI基準", 0, 100, 40)
 rci_t = st.sidebar.slider("RCI基準", -100, 100, -50)
 
-codes = st.text_area("銘柄コード (例: 9984, 7203)", "9984")
+codes = st.text_area("診断したいコード (例: 9984, 7203)", "9984")
 if st.button("🩺 診断開始", type="primary"):
     for c in [x.strip() for x in codes.split(',') if x.strip()]:
         res = diagnose_stock(c, min_v, rsi_t, rci_t)
@@ -125,10 +121,9 @@ if st.button("🩺 診断開始", type="primary"):
             c1, c2 = st.columns([1, 2])
             with c1:
                 for k, v in res['checks'].items(): st.write(f"{'✅' if v else '❌'} {k}")
-            with c2:
+            with col2 if 'col2' in locals() else c2:
                 fig = go.Figure(data=[go.Candlestick(x=res['df'].index, open=res['df']['Open'], high=res['df']['High'], low=res['df']['Low'], close=res['df']['Close'])])
                 fig.update_layout(height=300, margin=dict(l=0,r=0,b=0,t=0), xaxis_rangeslider_visible=False)
                 st.plotly_chart(fig, use_container_width=True)
             st.divider()
-        else:
-            st.error(f"{c}: {res}")
+        else: st.error(f"{c}: {res}")
