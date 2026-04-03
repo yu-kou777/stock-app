@@ -1,8 +1,6 @@
 streamlit
 yfinance
 pandas
-pandas-datareader
-lxml
 requests
 plotly
 xlrd
