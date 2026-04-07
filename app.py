@@ -7,7 +7,7 @@ import requests
 from io import BytesIO
 
 # --- 1. アプリ基本設定 ---
-st.set_page_config(layout="wide", page_title="Jack株AI: Stock Sniper Pro", page_icon="🏹")
+st.set_page_config(layout="wide", page_title="Jack株AI: Sniper Precision", page_icon="🏹")
 
 # --- 2. 銘柄名取得（JPX） ---
 @st.cache_data(ttl=86400)
@@ -22,7 +22,7 @@ def get_jpx_names():
 
 jpx_names = get_jpx_names()
 
-# --- 3. 自作テクニカル計算 ---
+# --- 3. テクニカル計算関数 ---
 def calculate_rsi(series, period=14):
     delta = series.diff()
     up = delta.clip(lower=0); down = -1 * delta.clip(upper=0)
@@ -49,10 +49,10 @@ def calculate_dmi(df, period=14):
 
 # --- 4. データ取得エンジン ---
 def get_stock_data(code):
+    # ルート1：Stooq (CSV直接)
     try:
         url = f"https://stooq.com/q/d/l/?s={code}.jp&i=d"
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        res = requests.get(url, headers=headers, timeout=5)
+        res = requests.get(url, timeout=5)
         if res.status_code == 200:
             df = pd.read_csv(BytesIO(res.content))
             if not df.empty and 'Close' in df.columns:
@@ -60,106 +60,102 @@ def get_stock_data(code):
                 df = df.set_index('Date').sort_index()
                 return df[['Open', 'High', 'Low', 'Close', 'Volume']].tail(250)
     except: pass
+    # ルート2：Yahoo
     try:
-        df = yf.download(f"{code}.T", period="1y", interval="1d", progress=False, timeout=3)
+        df = yf.download(f"{code}.T", period="1y", interval="1d", progress=False)
         if not df.empty:
             if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
             return df
     except: pass
     return pd.DataFrame()
 
-# --- 5. 診断エンジン（Jack株AIロジック） ---
+# --- 5. 診断エンジン（改良型Jackロジック） ---
 def diagnose_stock(code, min_v, rsi_t, rci_t):
     try:
         df = get_stock_data(code)
-        if df.empty: return "データが見つかりません。"
+        if df.empty: return "データ取得失敗"
         df = df.dropna(subset=['Close']).astype(float)
         
         c = df['Close']
         df['MA20'], df['MA60'], df['MA200'] = c.rolling(20).mean(), c.rolling(60).mean(), c.rolling(200).mean()
-        df['RSI'] = calculate_rsi(c); df['RCI9'], df['RCI26'] = calculate_rci(c, 9), calculate_rci(c, 26)
+        df['RSI'] = calculate_rsi(c); df['RCI9'] = calculate_rci(c, 9)
         df['+DI'], df['-DI'], df['ADX'] = calculate_dmi(df)
         df['std'] = c.rolling(20).std(); df['BBL'], df['BBU'] = df['MA20'] - 3*df['std'], df['MA20'] + 3*df['std']
         
         cur, pre = df.iloc[-1], df.iloc[-2]
+        avg_vol = df['Volume'].tail(5).mean()
         p = cur['Close']
 
-        # 🎯 Jack株AIロジック判定
-        # 1. RCI反発（底値圏-80以下から上昇）
-        rci_up = (pre['RCI9'] <= -80) and (cur['RCI9'] > pre['RCI9'])
-        # 2. DMIゴールデンクロス (+DI > -DI)
+        # 各種フラグ
         dmi_gc = (pre['+DI'] < pre['-DI']) and (cur['+DI'] >= cur['-DI'])
-        # 3. ADX上昇
+        dmi_dc = (pre['+DI'] > pre['-DI']) and (cur['+DI'] <= cur['-DI'])
+        vol_ok = avg_vol >= min_v
+        rci_up = cur['RCI9'] > pre['RCI9'] and pre['RCI9'] <= -80
         adx_up = cur['ADX'] > pre['ADX']
-        # 4. 確信（ADX > -DI）
+        adx_down = cur['ADX'] < pre['ADX']
         adx_strong = cur['ADX'] > cur['-DI']
+        bb_limit = (p <= cur['BBL']*1.03) or (p >= cur['BBU']*0.97)
+        bb_over_upper = p >= cur['BBU'] * 0.98
 
-        # 🛡️ だまし判定
-        is_damashi = cur['+DI'] < cur['-DI'] and not adx_up
+        # 🎯 4段階判定
+        if dmi_gc and vol_ok and rci_up and adx_up:
+            status, color = "🚀 急騰直前 (High Potential)", "green"
+        elif adx_strong and adx_up and cur['+DI'] > cur['-DI'] and not bb_limit:
+            status, color = "✨ 買い時 (Strong Buy)", "#00FF00" # 明るい緑
+        elif bb_over_upper or (cur['RSI'] >= 70 and adx_down) or dmi_dc:
+            status, color = "🛑 下落気配 (Warning / Sell)", "red"
+        elif cur['+DI'] > pre['+DI'] and (cur['+DI'] < cur['-DI'] or not adx_up):
+            status, color = "⚠️ だまし注意 (Fake Out / 自律反発)", "orange"
+        else:
+            status, color = "☁️ 様子見 (Wait / Neutral)", "gray"
 
-        chk = {
-            "RCI短期 底値反発 (-80以下)": rci_up,
-            "DMI ゴールデンクロス (+DI > -DI)": dmi_gc,
-            "ADX 上向き (トレンド発生)": adx_up,
+        checks = {
+            "DMI ゴールデンクロス": dmi_gc,
+            "出来高クリア": vol_ok,
+            "RCI短期 底値反発": cur['RCI9'] > pre['RCI9'],
+            "ADX 上向き (勢いあり)": adx_up,
             "トレンド確信 (ADX > -DI)": adx_strong,
-            "RSI・RCI 総合判断": cur['RSI'] <= rsi_t and cur['RCI9'] <= rci_t,
-            "ボリンジャー ±3σ接近": (p <= cur['BBL']*1.03) or (p >= cur['BBU']*0.97),
-            "出来高クリア": df['Volume'].tail(5).mean() >= min_v
+            "過熱感なし (BB±3σ未到達)": not bb_limit
         }
 
-        # ⏱️ 究極のタイミング診断
-        if dmi_gc and rci_up and adx_up:
-            tmg, col = "🚀 【鉄板】大引け前に買うべき！ (ロケット発射合図)", "green"
-        elif rci_up and (cur['+DI'] > pre['+DI']) and not dmi_gc:
-            tmg, col = "🌅 翌朝の寄り付きで確認 (準備段階: GC待ち)", "blue"
-        elif is_damashi and cur['RCI9'] > pre['RCI9']:
-            tmg, col = "⚠️ 手出し無用！ (だまし: 一時的な自律反発)", "orange"
-        elif cur['RCI9'] > 70 and pre['RCI9'] > cur['RCI9']:
-            tmg, col = "⏳ 待機・利益確定 (天井圏)", "red"
-        else:
-            tmg, col = "☁️ 様子見 (条件未合致)", "gray"
-
-        return {"name": jpx_names.get(code, "銘柄"), "code": code, "price": int(p), "timing": tmg, "color": col, "checks": chk, "df": df}
+        return {"name": jpx_names.get(code, "銘柄"), "code": code, "price": int(p), "status": status, "color": color, "checks": checks, "df": df}
     except Exception as e: return f"エラー: {e}"
 
 # --- 6. 画面構築 ---
-st.title("🏹 Jack株AI: Stock Sniper Pro")
-st.sidebar.markdown("### ⚙️ 精密診断設定")
+st.title("🏹 Jack株AI: Sniper Precision")
+st.sidebar.markdown("### ⚙️ 戦略パラメータ")
 min_v = st.sidebar.number_input("最低出来高", 0, 1000000, 100000)
-rsi_t = st.sidebar.slider("RSI基準", 0, 100, 40)
-rci_t = st.sidebar.slider("RCI基準", -100, 100, -50)
+rsi_t = st.sidebar.slider("RSI 底値圏基準", 0, 100, 40)
+rci_t = st.sidebar.slider("RCI 底値圏基準", -100, 100, -50)
 
 codes = st.text_area("診断したいコード (例: 9984, 7203)", "9984")
-if st.button("🩺 Jack株AI 診断開始", type="primary"):
+if st.button("🩺 精密スナイパー診断 開始", type="primary"):
     for c in [x.strip() for x in codes.split(',') if x.strip()]:
         res = diagnose_stock(c, min_v, rsi_t, rci_t)
         if isinstance(res, dict):
             st.markdown(f"### {res['name']} ({res['code']}) : {res['price']:,}円")
-            st.markdown(f"<h4 style='color:{res['color']}'>🤖 AI診断: {res['timing']}</h4>", unsafe_allow_html=True)
+            st.markdown(f"<h3 style='color:{res['color']}; background-color: rgba(0,0,0,0.1); padding: 10px; border-radius: 5px;'>判定: {res['status']}</h3>", unsafe_allow_html=True)
             
-            col1, col2 = st.columns([1, 2])
-            with col1:
-                st.markdown("##### 📋 合否判定リスト")
-                for k, v in res['checks'].items(): st.write(f"{'✅' if v else '❌'} {k}")
+            c1, c2 = st.columns([1, 2])
+            with c1:
+                st.markdown("##### 📋 戦略合致チェック")
+                for k, v in res['checks'].items():
+                    st.write(f"{'✅' if v else '❌'} {k}")
+                if "だまし" in res['status']:
+                    st.warning("【分析】$+DI$の上昇が見られますが、$-DI$を抜けていないかADXが弱いため、一時的な反発に終わるリスクが高いです。GCまで待機！")
             
-            with col2:
+            with c2:
                 df = res['df']
-                # サブチャート付きのグラフ作成
                 fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.7, 0.3])
-                
-                # メインチャート（ローソク足 + MA + BB）
                 fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='価格'), row=1, col=1)
                 fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], line=dict(color='green', width=1), name='20MA'), row=1, col=1)
-                fig.add_trace(go.Scatter(x=df.index, y=df['MA200'], line=dict(color='purple', width=1.5), name='200MA'), row=1, col=1)
+                fig.add_trace(go.Scatter(x=df.index, y=df['BBU'], line=dict(color='pink', width=1, dash='dot'), name='+3σ'), row=1, col=1)
                 fig.add_trace(go.Scatter(x=df.index, y=df['BBL'], line=dict(color='lightblue', width=1, dash='dot'), name='-3σ'), row=1, col=1)
                 
-                # DMIチャート (+DI, -DI, ADX)
-                fig.add_trace(go.Scatter(x=df.index, y=df['+DI'], line=dict(color='red', width=1.5), name='+DI (買勢)'), row=2, col=1)
-                fig.add_trace(go.Scatter(x=df.index, y=df['-DI'], line=dict(color='blue', width=1.5), name='-DI (売勢)'), row=2, col=1)
-                fig.add_trace(go.Scatter(x=df.index, y=df['ADX'], line=dict(color='orange', width=2), name='ADX (強度)'), row=2, col=1)
-                fig.add_hline(y=25, line_dash="dash", line_color="gray", row=2, col=1)
-                
-                fig.update_layout(height=500, margin=dict(l=0,r=0,b=0,t=0), xaxis_rangeslider_visible=False, showlegend=True)
+                fig.add_trace(go.Scatter(x=df.index, y=df['+DI'], line=dict(color='red', width=1.5), name='+DI'), row=2, col=1)
+                fig.add_trace(go.Scatter(x=df.index, y=df['-DI'], line=dict(color='blue', width=1.5), name='-DI'), row=2, col=1)
+                fig.add_trace(go.Scatter(x=df.index, y=df['ADX'], line=dict(color='orange', width=2.5), name='ADX'), row=2, col=1)
+                fig.update_layout(height=550, margin=dict(l=0,r=0,b=0,t=0), xaxis_rangeslider_visible=False)
                 st.plotly_chart(fig, use_container_width=True)
             st.divider()
         else: st.error(f"{c}: {res}")
