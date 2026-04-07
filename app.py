@@ -49,7 +49,6 @@ def calculate_dmi(df, period=14):
 
 # --- 4. データ取得エンジン ---
 def get_stock_data(code):
-    # ルート1：Stooq (CSV直接)
     try:
         url = f"https://stooq.com/q/d/l/?s={code}.jp&i=d"
         res = requests.get(url, timeout=5)
@@ -60,7 +59,6 @@ def get_stock_data(code):
                 df = df.set_index('Date').sort_index()
                 return df[['Open', 'High', 'Low', 'Close', 'Volume']].tail(250)
     except: pass
-    # ルート2：Yahoo
     try:
         df = yf.download(f"{code}.T", period="1y", interval="1d", progress=False)
         if not df.empty:
@@ -69,7 +67,7 @@ def get_stock_data(code):
     except: pass
     return pd.DataFrame()
 
-# --- 5. 診断エンジン（改良型Jackロジック） ---
+# --- 5. 診断エンジン（RCI Dual Cross搭載） ---
 def diagnose_stock(code, min_v, rsi_t, rci_t):
     try:
         df = get_stock_data(code)
@@ -78,7 +76,9 @@ def diagnose_stock(code, min_v, rsi_t, rci_t):
         
         c = df['Close']
         df['MA20'], df['MA60'], df['MA200'] = c.rolling(20).mean(), c.rolling(60).mean(), c.rolling(200).mean()
-        df['RSI'] = calculate_rsi(c); df['RCI9'] = calculate_rci(c, 9)
+        df['RSI'] = calculate_rsi(c)
+        df['RCI9'] = calculate_rci(c, 9)
+        df['RCI26'] = calculate_rci(c, 26) # 中期RCIを追加
         df['+DI'], df['-DI'], df['ADX'] = calculate_dmi(df)
         df['std'] = c.rolling(20).std(); df['BBL'], df['BBU'] = df['MA20'] - 3*df['std'], df['MA20'] + 3*df['std']
         
@@ -86,23 +86,26 @@ def diagnose_stock(code, min_v, rsi_t, rci_t):
         avg_vol = df['Volume'].tail(5).mean()
         p = cur['Close']
 
-        # 各種フラグ
+        # DMIフラグ
         dmi_gc = (pre['+DI'] < pre['-DI']) and (cur['+DI'] >= cur['-DI'])
         dmi_dc = (pre['+DI'] > pre['-DI']) and (cur['+DI'] <= cur['-DI'])
-        vol_ok = avg_vol >= min_v
-        rci_up = cur['RCI9'] > pre['RCI9'] and pre['RCI9'] <= -80
         adx_up = cur['ADX'] > pre['ADX']
-        adx_down = cur['ADX'] < pre['ADX']
         adx_strong = cur['ADX'] > cur['-DI']
-        bb_limit = (p <= cur['BBL']*1.03) or (p >= cur['BBU']*0.97)
-        bb_over_upper = p >= cur['BBU'] * 0.98
 
-        # 🎯 4段階判定
-        if dmi_gc and vol_ok and rci_up and adx_up:
+        # RCIフラグ (Dual Cross)
+        rci_gc = (pre['RCI9'] < pre['RCI26']) and (cur['RCI9'] >= cur['RCI26']) and (cur['RCI9'] < 0)
+        rci_dc = (pre['RCI9'] > pre['RCI26']) and (cur['RCI9'] <= cur['RCI26']) and (cur['RCI9'] > 70)
+        rci_up = cur['RCI9'] > pre['RCI9']
+
+        vol_ok = avg_vol >= min_v
+        bb_limit = (p <= cur['BBL']*1.03) or (p >= cur['BBU']*0.97)
+
+        # 🎯 4段階判定 (RCIクロスを組み込み)
+        if dmi_gc and vol_ok and (rci_up or rci_gc) and adx_up:
             status, color = "🚀 急騰直前 (High Potential)", "green"
-        elif adx_strong and adx_up and cur['+DI'] > cur['-DI'] and not bb_limit:
-            status, color = "✨ 買い時 (Strong Buy)", "#00FF00" # 明るい緑
-        elif bb_over_upper or (cur['RSI'] >= 70 and adx_down) or dmi_dc:
+        elif adx_strong and adx_up and (cur['+DI'] > cur['-DI']) and (rci_gc or cur['RCI9'] < 50) and not bb_limit:
+            status, color = "✨ 買い時 (Strong Buy)", "#00FF00"
+        elif (p >= cur['BBU'] * 0.98) or (cur['RSI'] >= 75 and not adx_up) or dmi_dc or rci_dc:
             status, color = "🛑 下落気配 (Warning / Sell)", "red"
         elif cur['+DI'] > pre['+DI'] and (cur['+DI'] < cur['-DI'] or not adx_up):
             status, color = "⚠️ だまし注意 (Fake Out / 自律反発)", "orange"
@@ -111,10 +114,11 @@ def diagnose_stock(code, min_v, rsi_t, rci_t):
 
         checks = {
             "DMI ゴールデンクロス": dmi_gc,
+            "RCI ゴールデンクロス (9>26)": rci_gc,
             "出来高クリア": vol_ok,
-            "RCI短期 底値反発": cur['RCI9'] > pre['RCI9'],
             "ADX 上向き (勢いあり)": adx_up,
             "トレンド確信 (ADX > -DI)": adx_strong,
+            "RCI デッドクロス (9<26)": rci_dc,
             "過熱感なし (BB±3σ未到達)": not bb_limit
         }
 
@@ -126,12 +130,12 @@ st.title("🏹 Jack株AI: Sniper Precision")
 st.sidebar.markdown("### ⚙️ 戦略パラメータ")
 min_v = st.sidebar.number_input("最低出来高", 0, 1000000, 100000)
 rsi_t = st.sidebar.slider("RSI 底値圏基準", 0, 100, 40)
-rci_t = st.sidebar.slider("RCI 底値圏基準", -100, 100, -50)
 
+# メイン診断
 codes = st.text_area("診断したいコード (例: 9984, 7203)", "9984")
 if st.button("🩺 精密スナイパー診断 開始", type="primary"):
     for c in [x.strip() for x in codes.split(',') if x.strip()]:
-        res = diagnose_stock(c, min_v, rsi_t, rci_t)
+        res = diagnose_stock(c, min_v, rsi_t, -50)
         if isinstance(res, dict):
             st.markdown(f"### {res['name']} ({res['code']}) : {res['price']:,}円")
             st.markdown(f"<h3 style='color:{res['color']}; background-color: rgba(0,0,0,0.1); padding: 10px; border-radius: 5px;'>判定: {res['status']}</h3>", unsafe_allow_html=True)
@@ -140,21 +144,28 @@ if st.button("🩺 精密スナイパー診断 開始", type="primary"):
             with c1:
                 st.markdown("##### 📋 戦略合致チェック")
                 for k, v in res['checks'].items():
-                    st.write(f"{'✅' if v else '❌'} {k}")
+                    # デッドクロスだけは「赤文字」で注意を引く
+                    if "デッドクロス" in k and v:
+                        st.markdown(f"<span style='color:red;'>⚠️ {k}</span>", unsafe_allow_html=True)
+                    else:
+                        st.write(f"{'✅' if v else '❌'} {k}")
+                
                 if "だまし" in res['status']:
-                    st.warning("【分析】$+DI$の上昇が見られますが、$-DI$を抜けていないかADXが弱いため、一時的な反発に終わるリスクが高いです。GCまで待機！")
+                    st.warning("【分析】$+DI$の上昇が見られますが、$-DI$を抜けていないかADXが弱いため、一時的な反発に終わるリスクが高いです。")
+                if res['checks']["RCI デッドクロス (9<26)"]:
+                    st.error("【警告】RCIの短期が中期を下抜きました。天井圏からの下落トレンド入りの可能性が高いです。")
             
             with c2:
                 df = res['df']
                 fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.7, 0.3])
                 fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='価格'), row=1, col=1)
                 fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], line=dict(color='green', width=1), name='20MA'), row=1, col=1)
-                fig.add_trace(go.Scatter(x=df.index, y=df['BBU'], line=dict(color='pink', width=1, dash='dot'), name='+3σ'), row=1, col=1)
-                fig.add_trace(go.Scatter(x=df.index, y=df['BBL'], line=dict(color='lightblue', width=1, dash='dot'), name='-3σ'), row=1, col=1)
                 
+                # DMIチャート
                 fig.add_trace(go.Scatter(x=df.index, y=df['+DI'], line=dict(color='red', width=1.5), name='+DI'), row=2, col=1)
                 fig.add_trace(go.Scatter(x=df.index, y=df['-DI'], line=dict(color='blue', width=1.5), name='-DI'), row=2, col=1)
                 fig.add_trace(go.Scatter(x=df.index, y=df['ADX'], line=dict(color='orange', width=2.5), name='ADX'), row=2, col=1)
+                
                 fig.update_layout(height=550, margin=dict(l=0,r=0,b=0,t=0), xaxis_rangeslider_visible=False)
                 st.plotly_chart(fig, use_container_width=True)
             st.divider()
