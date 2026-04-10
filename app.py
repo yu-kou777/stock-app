@@ -73,7 +73,7 @@ def diagnose_stock(code, min_v):
         
         c = df['Close']
         df['RCI9'] = calculate_rci(c, 9)
-        df['RCI52'] = calculate_rci(c, 52)
+        df['RCI27'] = calculate_rci(c, 27) # 長期を27日に変更
         df['+DI'], df['-DI'], df['ADX'] = calculate_dmi(df)
         df['VWAP'] = calculate_vwap(df, 25)
         df['std'] = c.rolling(20).std(); df['MA20'] = c.rolling(20).mean(); df['BBU'] = df['MA20'] + 3*df['std']
@@ -83,8 +83,8 @@ def diagnose_stock(code, min_v):
 
         # 判定フラグ
         dmi_gc = (pre['+DI'] < pre['-DI']) and (cur['+DI'] >= cur['-DI'])
-        rci_gc = (pre['RCI9'] < pre['RCI52']) and (cur['RCI9'] >= cur['RCI52']) and (cur['RCI9'] < 0)
-        rci_dc = (pre['RCI9'] > pre['RCI52']) and (cur['RCI9'] <= pre['RCI52']) and (cur['RCI9'] > 70)
+        rci_gc = (pre['RCI9'] < pre['RCI27']) and (cur['RCI9'] >= cur['RCI27']) and (cur['RCI9'] < 0)
+        rci_dc = (pre['RCI9'] > pre['RCI27']) and (cur['RCI9'] <= cur['RCI27']) and (cur['RCI9'] > 70)
         above_vwap = p > cur['VWAP']
         adx_up = cur['ADX'] > pre['ADX']
         vol_ok = df['Volume'].tail(5).mean() >= min_v
@@ -101,13 +101,12 @@ def diagnose_stock(code, min_v):
         else:
             status, color = "☁️ 様子見", "gray"
 
-        # チェック項目の作成（復活）
         checks = {
-            "DMI ゴールデンクロス (+DI > -DI)": dmi_gc,
-            "RCI 短期・長期クロス (9 > 52)": rci_gc,
+            "DMI ゴールデンクロス": dmi_gc,
+            "RCI 短期・長期クロス (9 > 27)": rci_gc,
             "VWAP(25日)より上で推移": above_vwap,
             "ADX 上向き (トレンド発生)": adx_up,
-            "出来高(5日平均)クリア": vol_ok,
+            "出来高クリア": vol_ok,
             "過熱感なし (BB+3σ未到達)": not bb_limit
         }
 
@@ -129,7 +128,6 @@ if st.button("🩺 スナイパー診断 開始", type="primary"):
             st.markdown(f"### {res['name']} ({res['code']}) : {res['price']:,}円")
             st.markdown(f"<h3 style='color:{res['color']};'>AI判定: {res['status']}</h3>", unsafe_allow_html=True)
             
-            # レイアウトを2カラムに分割（左にチェックリスト、右にチャート）
             col_left, col_right = st.columns([1, 2])
             
             with col_left:
@@ -137,16 +135,13 @@ if st.button("🩺 スナイパー診断 開始", type="primary"):
                 for k, v in res['checks'].items():
                     st.write(f"{'✅' if v else '❌'} {k}")
                 
-                # 補足メッセージ
                 if "だまし" in res['status']:
-                    st.warning("⚠️ 買い手は出ていますが、VWAPの下にあるか勢いが弱いため、戻り売りに注意してください。")
-                elif "急騰直前" in res['status']:
-                    st.success("🔥 最高の条件が揃いました。ロケット発射の準備完了です。")
+                    st.warning("⚠️ 買い手は出ていますが、勢いが不足しています。")
 
             with col_right:
                 fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.04, row_heights=[0.5, 0.25, 0.25])
                 
-                # 1段目: メイン (VWAP強調)
+                # 1段目: メイン (直近20日ズーム)
                 fig.add_trace(go.Candlestick(x=display_df.index, open=display_df['Open'], high=display_df['High'], low=display_df['Low'], close=display_df['Close'], name='価格'), row=1, col=1)
                 fig.add_trace(go.Scatter(x=display_df.index, y=display_df['VWAP'], line=dict(color='orange', width=2.5, dash='dot'), name='25日VWAP'), row=1, col=1)
                 
@@ -155,12 +150,13 @@ if st.button("🩺 スナイパー診断 開始", type="primary"):
                 fig.add_trace(go.Scatter(x=display_df.index, y=display_df['-DI'], line=dict(color='blue', width=2), name='-DI'), row=2, col=1)
                 fig.add_trace(go.Scatter(x=display_df.index, y=display_df['ADX'], line=dict(color='orange', width=3), name='ADX'), row=2, col=1)
                 
-                # 3段目: RCI (短期9 vs 長期52)
+                # 3段目: RCI (短期9 vs 長期27)
                 fig.add_trace(go.Scatter(x=display_df.index, y=display_df['RCI9'], line=dict(color='red', width=2), name='RCI 短期(9)'), row=3, col=1)
-                fig.add_trace(go.Scatter(x=display_df.index, y=res['df']['RCI52'].tail(20), line=dict(color='navy', width=2), name='RCI 長期(52)'), row=3, col=1)
+                fig.add_trace(go.Scatter(x=display_df.index, y=res['df']['RCI27'].tail(20), line=dict(color='navy', width=2), name='RCI 長期(27)'), row=3, col=1)
                 fig.add_hline(y=0, line_dash="dash", line_color="gray", row=3, col=1)
                 
                 fig.update_layout(height=700, margin=dict(l=0,r=0,b=0,t=0), xaxis_rangeslider_visible=False)
                 st.plotly_chart(fig, use_container_width=True)
             st.divider()
         else: st.error(f"{c}: {res}")
+
