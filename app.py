@@ -99,7 +99,7 @@ def diagnose_stock(code, min_v):
         else:
             status, color = "☁️ 様子見", "gray"
 
-        return {"name": jpx_names.get(code, "銘柄"), "code": code, "price": int(p), "status": status, "color": color, "df": df, "vwap": cur['VWAP']}
+        return {"name": jpx_names.get(code, "銘柄"), "code": code, "price": int(p), "status": status, "color": color, "df": df}
     except Exception as e: return f"エラー: {e}"
 
 # --- 6. 画面構築 ---
@@ -132,7 +132,7 @@ if st.button("🩺 ズーム診断 開始", type="primary"):
             
             # 3段目: RCI (短期9 vs 長期52)
             fig.add_trace(go.Scatter(x=display_df.index, y=display_df['RCI9'], line=dict(color='red', width=2), name='RCI 短期(9)'), row=3, col=1)
-            fig.add_trace(go.Scatter(x=display_df.index, y=df_rci52 := res['df']['RCI52'].tail(20), x_rci52 := display_df.index, line=dict(color='navy', width=2), name='RCI 長期(52)'), row=3, col=1)
+            fig.add_trace(go.Scatter(x=display_df.index, y=res['df']['RCI52'].tail(20), line=dict(color='navy', width=2), name='RCI 長期(52)'), row=3, col=1)
             fig.add_hline(y=0, line_dash="dash", line_color="gray", row=3, col=1)
             
             fig.update_layout(height=800, margin=dict(l=0,r=0,b=0,t=0), xaxis_rangeslider_visible=False)
