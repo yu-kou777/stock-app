@@ -81,25 +81,37 @@ def diagnose_stock(code, min_v):
         cur, pre = df.iloc[-1], df.iloc[-2]
         p = cur['Close']
 
-        # 判定ロジック
+        # 判定フラグ
         dmi_gc = (pre['+DI'] < pre['-DI']) and (cur['+DI'] >= cur['-DI'])
         rci_gc = (pre['RCI9'] < pre['RCI52']) and (cur['RCI9'] >= cur['RCI52']) and (cur['RCI9'] < 0)
+        rci_dc = (pre['RCI9'] > pre['RCI52']) and (cur['RCI9'] <= pre['RCI52']) and (cur['RCI9'] > 70)
         above_vwap = p > cur['VWAP']
         adx_up = cur['ADX'] > pre['ADX']
         vol_ok = df['Volume'].tail(5).mean() >= min_v
+        bb_limit = p >= cur['BBU'] * 0.98
 
         if dmi_gc and vol_ok and (cur['RCI9'] > pre['RCI9']) and adx_up and above_vwap:
             status, color = "🚀 急騰直前 (High Potential)", "green"
-        elif cur['ADX'] > cur['-DI'] and adx_up and cur['+DI'] > cur['-DI'] and above_vwap:
+        elif cur['ADX'] > cur['-DI'] and adx_up and cur['+DI'] > cur['-DI'] and above_vwap and not bb_limit:
             status, color = "✨ 買い時 (Strong Buy)", "#00FF00"
-        elif (p >= cur['BBU'] * 0.98) or (cur['RCI9'] < cur['RCI52'] and pre['RCI9'] > pre['RCI52'] and cur['RCI9'] > 70):
+        elif bb_limit or rci_dc:
             status, color = "🛑 下落警戒 (Warning)", "red"
         elif cur['+DI'] > pre['+DI'] and (cur['+DI'] < cur['-DI'] or not above_vwap):
             status, color = "⚠️ だまし注意 (Fake Out)", "orange"
         else:
             status, color = "☁️ 様子見", "gray"
 
-        return {"name": jpx_names.get(code, "銘柄"), "code": code, "price": int(p), "status": status, "color": color, "df": df}
+        # チェック項目の作成（復活）
+        checks = {
+            "DMI ゴールデンクロス (+DI > -DI)": dmi_gc,
+            "RCI 短期・長期クロス (9 > 52)": rci_gc,
+            "VWAP(25日)より上で推移": above_vwap,
+            "ADX 上向き (トレンド発生)": adx_up,
+            "出来高(5日平均)クリア": vol_ok,
+            "過熱感なし (BB+3σ未到達)": not bb_limit
+        }
+
+        return {"name": jpx_names.get(code, "銘柄"), "code": code, "price": int(p), "status": status, "color": color, "df": df, "checks": checks}
     except Exception as e: return f"エラー: {e}"
 
 # --- 6. 画面構築 ---
@@ -108,34 +120,47 @@ st.sidebar.markdown("### ⚙️ 精密設定")
 min_v = st.sidebar.number_input("最低出来高", 0, 1000000, 100000)
 
 codes = st.text_area("診断コード", "9984, 8035")
-if st.button("🩺 ズーム診断 開始", type="primary"):
+if st.button("🩺 スナイパー診断 開始", type="primary"):
     for c in [x.strip() for x in codes.split(',') if x.strip()]:
         res = diagnose_stock(c, min_v)
         if isinstance(res, dict):
-            # 表示用のデータ（直近20日に絞る）
             display_df = res['df'].tail(20) 
             
             st.markdown(f"### {res['name']} ({res['code']}) : {res['price']:,}円")
-            st.markdown(f"<h3 style='color:{res['color']};'>AI診断: {res['status']}</h3>", unsafe_allow_html=True)
+            st.markdown(f"<h3 style='color:{res['color']};'>AI判定: {res['status']}</h3>", unsafe_allow_html=True)
             
-            # チャート描画
-            fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.04, row_heights=[0.5, 0.25, 0.25])
+            # レイアウトを2カラムに分割（左にチェックリスト、右にチャート）
+            col_left, col_right = st.columns([1, 2])
             
-            # 1段目: メイン (直近20日)
-            fig.add_trace(go.Candlestick(x=display_df.index, open=display_df['Open'], high=display_df['High'], low=display_df['Low'], close=display_df['Close'], name='価格'), row=1, col=1)
-            fig.add_trace(go.Scatter(x=display_df.index, y=display_df['VWAP'], line=dict(color='orange', width=2, dash='dot'), name='25日VWAP'), row=1, col=1)
-            
-            # 2段目: DMI
-            fig.add_trace(go.Scatter(x=display_df.index, y=display_df['+DI'], line=dict(color='red', width=2), name='+DI'), row=2, col=1)
-            fig.add_trace(go.Scatter(x=display_df.index, y=display_df['-DI'], line=dict(color='blue', width=2), name='-DI'), row=2, col=1)
-            fig.add_trace(go.Scatter(x=display_df.index, y=display_df['ADX'], line=dict(color='orange', width=3), name='ADX'), row=2, col=1)
-            
-            # 3段目: RCI (短期9 vs 長期52)
-            fig.add_trace(go.Scatter(x=display_df.index, y=display_df['RCI9'], line=dict(color='red', width=2), name='RCI 短期(9)'), row=3, col=1)
-            fig.add_trace(go.Scatter(x=display_df.index, y=res['df']['RCI52'].tail(20), line=dict(color='navy', width=2), name='RCI 長期(52)'), row=3, col=1)
-            fig.add_hline(y=0, line_dash="dash", line_color="gray", row=3, col=1)
-            
-            fig.update_layout(height=800, margin=dict(l=0,r=0,b=0,t=0), xaxis_rangeslider_visible=False)
-            st.plotly_chart(fig, use_container_width=True)
+            with col_left:
+                st.markdown("##### 📋 戦略合致チェック")
+                for k, v in res['checks'].items():
+                    st.write(f"{'✅' if v else '❌'} {k}")
+                
+                # 補足メッセージ
+                if "だまし" in res['status']:
+                    st.warning("⚠️ 買い手は出ていますが、VWAPの下にあるか勢いが弱いため、戻り売りに注意してください。")
+                elif "急騰直前" in res['status']:
+                    st.success("🔥 最高の条件が揃いました。ロケット発射の準備完了です。")
+
+            with col_right:
+                fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.04, row_heights=[0.5, 0.25, 0.25])
+                
+                # 1段目: メイン (VWAP強調)
+                fig.add_trace(go.Candlestick(x=display_df.index, open=display_df['Open'], high=display_df['High'], low=display_df['Low'], close=display_df['Close'], name='価格'), row=1, col=1)
+                fig.add_trace(go.Scatter(x=display_df.index, y=display_df['VWAP'], line=dict(color='orange', width=2.5, dash='dot'), name='25日VWAP'), row=1, col=1)
+                
+                # 2段目: DMI
+                fig.add_trace(go.Scatter(x=display_df.index, y=display_df['+DI'], line=dict(color='red', width=2), name='+DI'), row=2, col=1)
+                fig.add_trace(go.Scatter(x=display_df.index, y=display_df['-DI'], line=dict(color='blue', width=2), name='-DI'), row=2, col=1)
+                fig.add_trace(go.Scatter(x=display_df.index, y=display_df['ADX'], line=dict(color='orange', width=3), name='ADX'), row=2, col=1)
+                
+                # 3段目: RCI (短期9 vs 長期52)
+                fig.add_trace(go.Scatter(x=display_df.index, y=display_df['RCI9'], line=dict(color='red', width=2), name='RCI 短期(9)'), row=3, col=1)
+                fig.add_trace(go.Scatter(x=display_df.index, y=res['df']['RCI52'].tail(20), line=dict(color='navy', width=2), name='RCI 長期(52)'), row=3, col=1)
+                fig.add_hline(y=0, line_dash="dash", line_color="gray", row=3, col=1)
+                
+                fig.update_layout(height=700, margin=dict(l=0,r=0,b=0,t=0), xaxis_rangeslider_visible=False)
+                st.plotly_chart(fig, use_container_width=True)
             st.divider()
         else: st.error(f"{c}: {res}")
