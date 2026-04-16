@@ -9,7 +9,7 @@ from io import BytesIO
 # --- 1. アプリ基本設定 ---
 st.set_page_config(layout="wide", page_title="Jack株AI: Sniper Precision", page_icon="🏹")
 
-# --- 2. 銘柄名取得（JPX） ---
+# --- 2. 銘柄名取得 ---
 @st.cache_data(ttl=86400)
 def get_jpx_names():
     url = "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xls"
@@ -33,8 +33,7 @@ def calculate_dmi(df, period=14):
     h, l, c = df['High'], df['Low'], df['Close']; pc = c.shift(1)
     tr = pd.concat([h-l, (h-pc).abs(), (l-pc).abs()], axis=1).max(axis=1)
     um, dm = h - h.shift(1), l.shift(1) - l
-    pdm, mdm = pd.Series(0.0, index=df.index), pd.Series(0.0, index=df.index)
-    pdm[(um > dm) & (um > 0)] = um; mdm[(dm > um) & (dm > 0)] = dm
+    pdm = um.where((um > dm) & (um > 0), 0); mdm = dm.where((dm > um) & (dm > 0), 0)
     def rma(s, p): return s.ewm(alpha=1/p, adjust=False).mean()
     atr = rma(tr, period); pdi = 100 * rma(pdm, period) / atr; mdi = 100 * rma(mdm, period) / atr
     adx = rma(100 * (pdi - mdi).abs() / (pdi + mdi), period)
@@ -73,7 +72,7 @@ def diagnose_stock(code, min_v):
         
         c = df['Close']
         df['RCI9'] = calculate_rci(c, 9)
-        df['RCI27'] = calculate_rci(c, 27) # 長期を27日に変更
+        df['RCI27'] = calculate_rci(c, 27) # 楽天証券仕様(27日)
         df['+DI'], df['-DI'], df['ADX'] = calculate_dmi(df)
         df['VWAP'] = calculate_vwap(df, 25)
         df['std'] = c.rolling(20).std(); df['MA20'] = c.rolling(20).mean(); df['BBU'] = df['MA20'] + 3*df['std']
@@ -81,7 +80,7 @@ def diagnose_stock(code, min_v):
         cur, pre = df.iloc[-1], df.iloc[-2]
         p = cur['Close']
 
-        # 判定フラグ
+        # ロジック判定
         dmi_gc = (pre['+DI'] < pre['-DI']) and (cur['+DI'] >= cur['-DI'])
         rci_gc = (pre['RCI9'] < pre['RCI27']) and (cur['RCI9'] >= cur['RCI27']) and (cur['RCI9'] < 0)
         rci_dc = (pre['RCI9'] > pre['RCI27']) and (cur['RCI9'] <= cur['RCI27']) and (cur['RCI9'] > 70)
@@ -91,23 +90,23 @@ def diagnose_stock(code, min_v):
         bb_limit = p >= cur['BBU'] * 0.98
 
         if dmi_gc and vol_ok and (cur['RCI9'] > pre['RCI9']) and adx_up and above_vwap:
-            status, color = "🚀 急騰直前 (High Potential)", "green"
+            status, color = "🚀 急騰直前", "green"
         elif cur['ADX'] > cur['-DI'] and adx_up and cur['+DI'] > cur['-DI'] and above_vwap and not bb_limit:
-            status, color = "✨ 買い時 (Strong Buy)", "#00FF00"
+            status, color = "✨ 買い時", "#00FF00"
         elif bb_limit or rci_dc:
-            status, color = "🛑 下落警戒 (Warning)", "red"
+            status, color = "🛑 下落警戒", "red"
         elif cur['+DI'] > pre['+DI'] and (cur['+DI'] < cur['-DI'] or not above_vwap):
-            status, color = "⚠️ だまし注意 (Fake Out)", "orange"
+            status, color = "⚠️ だまし注意", "orange"
         else:
             status, color = "☁️ 様子見", "gray"
 
         checks = {
             "DMI ゴールデンクロス": dmi_gc,
-            "RCI 短期・長期クロス (9 > 27)": rci_gc,
-            "VWAP(25日)より上で推移": above_vwap,
-            "ADX 上向き (トレンド発生)": adx_up,
+            "RCI クロス (9 > 27)": rci_gc,
+            "VWAP(25日)より上": above_vwap,
+            "ADX 上向き": adx_up,
             "出来高クリア": vol_ok,
-            "過熱感なし (BB+3σ未到達)": not bb_limit
+            "過熱感なし": not bb_limit
         }
 
         return {"name": jpx_names.get(code, "銘柄"), "code": code, "price": int(p), "status": status, "color": color, "df": df, "checks": checks}
@@ -118,45 +117,39 @@ st.title("🏹 Jack株AI: Sniper Precision")
 st.sidebar.markdown("### ⚙️ 精密設定")
 min_v = st.sidebar.number_input("最低出来高", 0, 1000000, 100000)
 
-codes = st.text_area("診断コード", "9984, 8035")
+codes_input = st.text_area("診断コード (カンマ区切り)", "9984, 8035, 6834")
 if st.button("🩺 スナイパー診断 開始", type="primary"):
-    for c in [x.strip() for x in codes.split(',') if x.strip()]:
+    code_list = [x.strip() for x in codes_input.split(',') if x.strip()]
+    hit_codes = [] 
+    
+    for c in code_list:
         res = diagnose_stock(c, min_v)
         if isinstance(res, dict):
+            hit_codes.append(res['code'])
             display_df = res['df'].tail(20) 
             
             st.markdown(f"### {res['name']} ({res['code']}) : {res['price']:,}円")
             st.markdown(f"<h3 style='color:{res['color']};'>AI判定: {res['status']}</h3>", unsafe_allow_html=True)
             
             col_left, col_right = st.columns([1, 2])
-            
             with col_left:
                 st.markdown("##### 📋 戦略合致チェック")
-                for k, v in res['checks'].items():
-                    st.write(f"{'✅' if v else '❌'} {k}")
-                
-                if "だまし" in res['status']:
-                    st.warning("⚠️ 買い手は出ていますが、勢いが不足しています。")
-
+                for k, v in res['checks'].items(): st.write(f"{'✅' if v else '❌'} {k}")
             with col_right:
                 fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.04, row_heights=[0.5, 0.25, 0.25])
-                
-                # 1段目: メイン (直近20日ズーム)
                 fig.add_trace(go.Candlestick(x=display_df.index, open=display_df['Open'], high=display_df['High'], low=display_df['Low'], close=display_df['Close'], name='価格'), row=1, col=1)
                 fig.add_trace(go.Scatter(x=display_df.index, y=display_df['VWAP'], line=dict(color='orange', width=2.5, dash='dot'), name='25日VWAP'), row=1, col=1)
-                
-                # 2段目: DMI
                 fig.add_trace(go.Scatter(x=display_df.index, y=display_df['+DI'], line=dict(color='red', width=2), name='+DI'), row=2, col=1)
                 fig.add_trace(go.Scatter(x=display_df.index, y=display_df['-DI'], line=dict(color='blue', width=2), name='-DI'), row=2, col=1)
                 fig.add_trace(go.Scatter(x=display_df.index, y=display_df['ADX'], line=dict(color='orange', width=3), name='ADX'), row=2, col=1)
-                
-                # 3段目: RCI (短期9 vs 長期27)
-                fig.add_trace(go.Scatter(x=display_df.index, y=display_df['RCI9'], line=dict(color='red', width=2), name='RCI 短期(9)'), row=3, col=1)
-                fig.add_trace(go.Scatter(x=display_df.index, y=res['df']['RCI27'].tail(20), line=dict(color='navy', width=2), name='RCI 長期(27)'), row=3, col=1)
+                fig.add_trace(go.Scatter(x=display_df.index, y=display_df['RCI9'], line=dict(color='red', width=2), name='RCI 9'), row=3, col=1)
+                fig.add_trace(go.Scatter(x=display_df.index, y=res['df']['RCI27'].tail(20), line=dict(color='navy', width=2), name='RCI 27'), row=3, col=1)
                 fig.add_hline(y=0, line_dash="dash", line_color="gray", row=3, col=1)
-                
                 fig.update_layout(height=700, margin=dict(l=0,r=0,b=0,t=0), xaxis_rangeslider_visible=False)
                 st.plotly_chart(fig, use_container_width=True)
             st.divider()
         else: st.error(f"{c}: {res}")
-
+    
+    if hit_codes:
+        st.subheader("📋 診断銘柄コピペ用リスト")
+        st.code(",".join(hit_codes), language="text")
